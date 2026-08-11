@@ -1,0 +1,230 @@
+const express = require("express");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
+const { transcribeVideo } = require("../agents/transcribe");
+const { generateMaterials } = require("../agents/generate");
+const { slugify } = require("../utils/slugify");
+const supabase = require("../db/supabase");
+
+const router = express.Router();
+
+const upload = multer({
+  dest: path.join(__dirname, "..", "uploads_tmp"),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB — límite de la API de Whisper
+});
+
+function requireSupabase(res) {
+  if (!supabase) {
+    res.status(500).json({
+      error: "Supabase no está configurado. Revisa SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en tu .env.",
+    });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * POST /api/courses/upload
+ * form-data: video (archivo), creatorId (uuid), title (texto),
+ *            audience ("ninos"|"padres"|"profesionales"),
+ *            tutorAnswers (JSON string, opcional)
+ *
+ * Sube el video a Supabase Storage, transcribe, genera materiales,
+ * y guarda todo en la base de datos como curso en estado "borrador".
+ */
+router.post("/upload", upload.single("video"), async (req, res) => {
+  if (!requireSupabase(res)) return;
+
+  const tmpFilePath = req.file?.path;
+
+  try {
+    const { creatorId, title, audience, tutorAnswers } = req.body;
+
+    if (!req.file) {
+      return res.status(400).json({ error: "Falta el archivo de video (campo 'video')." });
+    }
+    if (!creatorId) {
+      return res.status(400).json({ error: "Falta creatorId." });
+    }
+    if (!title) {
+      return res.status(400).json({ error: "Falta title (título del curso)." });
+    }
+    if (!["ninos", "padres", "profesionales"].includes(audience)) {
+      return res.status(400).json({ error: "audience debe ser 'ninos', 'padres' o 'profesionales'." });
+    }
+
+    const parsedTutorAnswers = tutorAnswers ? JSON.parse(tutorAnswers) : null;
+
+    // 1. Subir el video a Supabase Storage (bucket "course-videos", créalo antes en el dashboard)
+    const fileBuffer = fs.readFileSync(tmpFilePath);
+    const storagePath = `${creatorId}/${Date.now()}-${req.file.originalname}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("course-videos")
+      .upload(storagePath, fileBuffer, { contentType: req.file.mimetype });
+
+    if (uploadError) {
+      throw new Error(`Error subiendo video a Storage: ${uploadError.message}`);
+    }
+
+    const { data: publicUrlData } = supabase.storage
+      .from("course-videos")
+      .getPublicUrl(storagePath);
+    const videoUrl = publicUrlData.publicUrl;
+
+    // 2. Transcribir
+    const { text: transcript } = await transcribeVideo(tmpFilePath);
+
+    // 3. Generar materiales (automático si no hay tutorAnswers, con ayuda si sí)
+    const materials = await generateMaterials(transcript, audience, parsedTutorAnswers);
+
+    // 4. Guardar curso en estado "borrador"
+    const { data: course, error: courseError } = await supabase
+      .from("courses")
+      .insert({
+        creator_id: creatorId,
+        title,
+        audience,
+        price_mxn: 0, // se define al publicar
+        video_url: videoUrl,
+        transcript,
+        status: "borrador",
+      })
+      .select()
+      .single();
+
+    if (courseError) throw new Error(`Error guardando curso: ${courseError.message}`);
+
+    // 5. Guardar los materiales generados, ligados al curso
+    const { data: savedMaterials, error: materialsError } = await supabase
+      .from("course_materials")
+      .insert({
+        course_id: course.id,
+        generation_mode: parsedTutorAnswers ? "con_ayuda_tutor" : "automatico",
+        resumen: materials.resumen || null,
+        trivia: materials.trivia || null,
+        memorama: materials.memorama || null,
+        tips: materials.tips || null,
+      })
+      .select()
+      .single();
+
+    if (materialsError) throw new Error(`Error guardando materiales: ${materialsError.message}`);
+
+    res.json({ status: "borrador_creado", course, materials: savedMaterials });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  } finally {
+    // limpia el archivo temporal sin importar si hubo error
+    if (tmpFilePath && fs.existsSync(tmpFilePath)) fs.unlinkSync(tmpFilePath);
+  }
+});
+
+/**
+ * GET /api/courses/:id
+ * Regresa el curso + sus materiales, para la pantalla de revisión/edición.
+ */
+router.get("/:id", async (req, res) => {
+  if (!requireSupabase(res)) return;
+
+  try {
+    const { data: course, error: courseError } = await supabase
+      .from("courses")
+      .select("*")
+      .eq("id", req.params.id)
+      .single();
+    if (courseError) throw new Error(courseError.message);
+
+    const { data: materials, error: materialsError } = await supabase
+      .from("course_materials")
+      .select("*")
+      .eq("course_id", req.params.id)
+      .single();
+    if (materialsError) throw new Error(materialsError.message);
+
+    res.json({ course, materials });
+  } catch (err) {
+    res.status(404).json({ error: `No se encontró el curso: ${err.message}` });
+  }
+});
+
+/**
+ * PATCH /api/courses/:id/materials
+ * body: { resumen_editado?, trivia_editado?, memorama_editado?, tips_editado? }
+ *
+ * Guarda las ediciones del creador sin tocar la versión original generada por IA.
+ */
+router.patch("/:id/materials", async (req, res) => {
+  if (!requireSupabase(res)) return;
+
+  try {
+    const { resumen_editado, trivia_editado, memorama_editado, tips_editado } = req.body;
+
+    const { data, error } = await supabase
+      .from("course_materials")
+      .update({
+        resumen_editado,
+        trivia_editado,
+        memorama_editado,
+        tips_editado,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("course_id", req.params.id)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    res.json({ status: "materiales_actualizados", materials: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/courses/:id/publish
+ * body: { price_mxn }
+ *
+ * Publica el curso: le asigna slug público, precio, y lo marca como publicado.
+ */
+router.post("/:id/publish", async (req, res) => {
+  if (!requireSupabase(res)) return;
+
+  try {
+    const { price_mxn } = req.body;
+    if (!price_mxn || price_mxn <= 0) {
+      return res.status(400).json({ error: "price_mxn es requerido y debe ser mayor a 0." });
+    }
+
+    const { data: existingCourse, error: fetchError } = await supabase
+      .from("courses")
+      .select("title")
+      .eq("id", req.params.id)
+      .single();
+    if (fetchError) throw new Error(fetchError.message);
+
+    const slug = slugify(existingCourse.title);
+
+    const { data, error } = await supabase
+      .from("courses")
+      .update({
+        price_mxn,
+        slug,
+        status: "publicado",
+        published_at: new Date().toISOString(),
+      })
+      .eq("id", req.params.id)
+      .select()
+      .single();
+
+    if (error) throw new Error(error.message);
+
+    res.json({ status: "publicado", course: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+module.exports = router;
