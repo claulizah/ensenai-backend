@@ -11,7 +11,7 @@ const router = express.Router();
 
 const upload = multer({
   dest: path.join(__dirname, "..", "uploads_tmp"),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB — límite de la API de Whisper
+  limits: { fileSize: 200 * 1024 * 1024 }, // 200 MB — cubre hasta ~10 min de video, el audio se comprime aparte para Whisper
 });
 
 function requireSupabase(res) {
@@ -123,6 +123,26 @@ router.post("/upload", upload.single("video"), async (req, res) => {
 });
 
 /**
+ * GET /api/courses/precio-vigente
+ * Regresa el precio individual actual (configurado en platform_settings).
+ * IMPORTANTE: esta ruta debe ir ANTES de "/:id" o Express la confunde con un ID.
+ */
+router.get("/precio-vigente", async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { data, error } = await supabase
+      .from("platform_settings")
+      .select("individual_course_price_mxn")
+      .eq("id", 1)
+      .single();
+    if (error) throw new Error(error.message);
+    res.json({ price_mxn: data.individual_course_price_mxn });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /api/courses/:id
  * Regresa el curso + sus materiales, para la pantalla de revisión/edición.
  */
@@ -185,18 +205,21 @@ router.patch("/:id/materials", async (req, res) => {
 
 /**
  * POST /api/courses/:id/publish
- * body: { price_mxn }
  *
- * Publica el curso: le asigna slug público, precio, y lo marca como publicado.
+ * Publica el curso: le asigna slug público y lo marca como publicado.
+ * El precio individual ya NO lo define el creador — se toma el valor
+ * fijo de platform_settings (editable desde Supabase, no desde la app).
  */
 router.post("/:id/publish", async (req, res) => {
   if (!requireSupabase(res)) return;
 
   try {
-    const { price_mxn } = req.body;
-    if (!price_mxn || price_mxn <= 0) {
-      return res.status(400).json({ error: "price_mxn es requerido y debe ser mayor a 0." });
-    }
+    const { data: settings, error: settingsError } = await supabase
+      .from("platform_settings")
+      .select("individual_course_price_mxn")
+      .eq("id", 1)
+      .single();
+    if (settingsError) throw new Error(`No se pudo leer el precio de la plataforma: ${settingsError.message}`);
 
     const { data: existingCourse, error: fetchError } = await supabase
       .from("courses")
@@ -210,7 +233,7 @@ router.post("/:id/publish", async (req, res) => {
     const { data, error } = await supabase
       .from("courses")
       .update({
-        price_mxn,
+        price_mxn: settings.individual_course_price_mxn,
         slug,
         status: "publicado",
         published_at: new Date().toISOString(),
