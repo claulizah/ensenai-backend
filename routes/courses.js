@@ -141,7 +141,42 @@ router.get("/precio-vigente", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+/**
+ * GET /api/courses/publico/:slug
+ * Regresa un curso publicado (con el nombre del creador) y una vista previa
+ * del resumen, para la página pública del curso (curso.html).
+ * IMPORTANTE: esta ruta debe ir ANTES de "/:id" o Express la confunde con un ID.
+ */
+router.get("/publico/:slug", async (req, res) => {
+  if (!requireSupabase(res)) return;
 
+  try {
+    const { data: course, error: courseError } = await supabase
+      .from("courses")
+      .select("*, creators(name)")
+      .eq("slug", req.params.slug)
+      .eq("status", "publicado")
+      .single();
+
+    if (courseError || !course) {
+      return res.status(404).json({ error: "Curso no encontrado." });
+    }
+
+    const { data: materials } = await supabase
+      .from("course_materials")
+      .select("resumen, resumen_editado")
+      .eq("course_id", course.id)
+      .single();
+
+    const preview = {
+      resumen: materials?.resumen_editado || materials?.resumen || null,
+    };
+
+    res.json({ course, preview });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 /**
  * GET /api/courses/:id
  * Regresa el curso + sus materiales, para la pantalla de revisión/edición.
