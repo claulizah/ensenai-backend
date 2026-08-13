@@ -162,6 +162,27 @@ router.get("/publico/:slug", async (req, res) => {
       return res.status(404).json({ error: "Curso no encontrado." });
     }
 
+    // Por default NO se manda la liga del video — solo se agrega si
+    // el visitante tiene sesión y ya compró este curso.
+    let tieneAcceso = false;
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+    if (token) {
+      const { data: userData } = await supabase.auth.getUser(token);
+      if (userData?.user) {
+        const { data: compra } = await supabase
+          .from("course_purchases")
+          .select("id")
+          .eq("user_id", userData.user.id)
+          .eq("course_id", course.id)
+          .maybeSingle();
+        tieneAcceso = !!compra;
+      }
+    }
+
+    const cursoParaEnviar = { ...course, video_url: tieneAcceso ? course.video_url : null };
+
     const { data: materials } = await supabase
       .from("course_materials")
       .select("resumen, resumen_editado")
@@ -172,7 +193,7 @@ router.get("/publico/:slug", async (req, res) => {
       resumen: materials?.resumen_editado || materials?.resumen || null,
     };
 
-    res.json({ course, preview });
+    res.json({ course: cursoParaEnviar, preview, tieneAcceso });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
