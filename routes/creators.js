@@ -31,6 +31,21 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Faltan name y/o email." });
     }
 
+    // Si ya existe un creador con este correo, lo regresamos en vez de
+    // intentar crear uno nuevo (evita el error de llave única y deja
+    // que un creador que regresa siga usando su cuenta existente).
+    const { data: existing, error: findError } = await supabase
+      .from("creators")
+      .select("*")
+      .eq("email", email)
+      .maybeSingle();
+
+    if (findError) throw new Error(findError.message);
+
+    if (existing) {
+      return res.json({ status: "creador_existente", creator: existing });
+    }
+
     const { data, error } = await supabase
       .from("creators")
       .insert({ name, email, slug: slugify(name) })
