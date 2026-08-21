@@ -1,10 +1,5 @@
 const supabase = require("../db/supabase");
 
-/**
- * Espera el header "Authorization: Bearer <token>" que el frontend obtiene
- * de Supabase Auth al hacer login. Verifica el token y adjunta el usuario
- * a req.user para que las rutas protegidas lo usen.
- */
 async function requireBuyer(req, res, next) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
