@@ -107,8 +107,17 @@ router.post("/checkout-bundle", requireBuyer, async (req, res) => {
  * POST /api/purchases/checkout-suscripcion
  * body: { tipo: "individual"|"grupo", plan: "mensual"|"anual" }
  * Crea una sesión de Stripe Checkout en modo "subscription" (recurrente).
- * El plan "anual" cobra una sola exhibición al año (equivalente a $120
- * MXN/mes); "grupo" por ahora solo existe mensual.
+ * El plan "anual" cobra una sola exhibición al año; "grupo" por ahora solo
+ * existe mensual.
+ *
+ * Precio de fundador: si el usuario se registró antes del cierre de la
+ * promo de lanzamiento (platform_settings.fecha_cierre_promo_lanzamiento —
+ * la MISMA fecha que ya define el freemium de 3 temas gratis, ver
+ * schema_v20.sql), el plan mensual (individual o grupo) se le cobra al
+ * precio de fundador — y como Stripe cobra las renovaciones al mismo monto
+ * con el que se creó la suscripción, ese precio queda congelado para
+ * siempre mientras no cancele. El plan anual no tiene precio de fundador
+ * distinto por ahora.
  */
 router.post("/checkout-suscripcion", requireBuyer, async (req, res) => {
   try {
@@ -125,24 +134,29 @@ router.post("/checkout-suscripcion", requireBuyer, async (req, res) => {
 
     const { data: settings, error: settingsError } = await supabase
       .from("platform_settings")
-      .select("suscripcion_individual_mensual_mxn, suscripcion_individual_anual_mxn, suscripcion_grupo_mensual_mxn")
+      .select(
+        "suscripcion_individual_mensual_mxn, suscripcion_individual_anual_mxn, suscripcion_grupo_mensual_mxn, " +
+          "suscripcion_individual_mensual_founder_mxn, suscripcion_grupo_mensual_founder_mxn, fecha_cierre_promo_lanzamiento"
+      )
       .eq("id", 1)
       .single();
     if (settingsError) throw new Error(settingsError.message);
 
+    const esFounder = plan === "mensual" && new Date(req.user.created_at) < new Date(settings.fecha_cierre_promo_lanzamiento);
+
     let amountMxn, interval, label;
     if (tipo === "individual" && plan === "mensual") {
-      amountMxn = settings.suscripcion_individual_mensual_mxn;
+      amountMxn = esFounder ? settings.suscripcion_individual_mensual_founder_mxn : settings.suscripcion_individual_mensual_mxn;
       interval = "month";
-      label = "Suscripción individual — mensual";
+      label = `Suscripción individual — mensual${esFounder ? " (precio de fundador)" : ""}`;
     } else if (tipo === "individual" && plan === "anual") {
       amountMxn = settings.suscripcion_individual_anual_mxn;
       interval = "year";
       label = "Suscripción individual — anual";
     } else {
-      amountMxn = settings.suscripcion_grupo_mensual_mxn;
+      amountMxn = esFounder ? settings.suscripcion_grupo_mensual_founder_mxn : settings.suscripcion_grupo_mensual_mxn;
       interval = "month";
-      label = "Suscripción de grupo — mensual";
+      label = `Suscripción de grupo — mensual${esFounder ? " (precio de fundador)" : ""}`;
     }
 
     const stripe = getStripe();
@@ -160,9 +174,15 @@ router.post("/checkout-suscripcion", requireBuyer, async (req, res) => {
           quantity: 1,
         },
       ],
-      metadata: { type: "suscripcion", tipo, plan, user_id: req.user.id },
-      success_url: `${process.env.FRONTEND_URL}/comprador.html?suscripcion=exitosa`,
-      cancel_url: `${process.env.FRONTEND_URL}/comprador.html?suscripcion=cancelada`,
+      metadata: { type: "suscripcion", tipo, plan, user_id: req.user.id, es_founder: String(esFounder), precio_mxn: String(amountMxn) },
+      success_url:
+        tipo === "grupo"
+          ? `${process.env.FRONTEND_URL}/grupo.html?suscripcion=exitosa`
+          : `${process.env.FRONTEND_URL}/comprador.html?suscripcion=exitosa`,
+      cancel_url:
+        tipo === "grupo"
+          ? `${process.env.FRONTEND_URL}/grupo.html?suscripcion=cancelada`
+          : `${process.env.FRONTEND_URL}/comprador.html?suscripcion=cancelada`,
     });
 
     res.json({ checkout_url: session.url });
