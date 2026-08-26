@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EnseñAI — Generar tema</title>
+<link rel="icon" type="image/png" href="assets/favicon-32.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Grandstander:wght@500;600;700&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root {
+    --profundo: #1E3A8A; --profundo-oscuro: #16296B; --cielo: #60A5FA;
+    --menta: #34D399; --aqua: #7DD3FC; --bosque: #065F46;
+    --hielo: #F0FDF4; --tinta: #1E3A8A; --linea: #DCEEFC;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: 'Nunito', sans-serif;
+    background:
+      radial-gradient(circle at 12% 8%, rgba(96,165,250,0.35) 0, transparent 30%),
+      radial-gradient(circle at 90% 20%, rgba(125,211,252,0.32) 0, transparent 32%),
+      var(--hielo);
+    color: var(--tinta); min-height: 100vh;
+  }
+  header { background: var(--profundo); color: #fff; padding: 18px 24px; display: flex; align-items: center; justify-content: space-between; }
+  header a { color: inherit; text-decoration: none; display: flex; align-items: center; gap: 10px; }
+  header .marca { font-family: 'Grandstander', sans-serif; font-weight: 700; font-size: 1.4rem; }
+  header .marca .ai {
+    display: inline-block; color: var(--aqua); background: rgba(255,255,255,0.14);
+    padding: 1px 10px; border-radius: 999px; font-size: 0.75em; vertical-align: middle;
+  }
+  #btnSalir { background: none; border: 1px solid rgba(255,255,255,0.4); color: #fff; padding: 7px 14px; border-radius: 999px; font-size: 0.85rem; cursor: pointer; }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 20px 80px; }
+  .tarjeta { background: #fff; border: 2px solid var(--linea); border-radius: 18px; padding: 22px; margin-bottom: 18px; box-shadow: 0 3px 0 var(--linea); }
+  h1 { font-family: 'Grandstander', sans-serif; font-size: 1.4rem; margin: 0 0 6px; }
+  h2 { font-family: 'Grandstander', sans-serif; font-size: 1.15rem; margin: 0 0 8px; color: var(--profundo); }
+  h3 { font-family: 'Grandstander', sans-serif; color: var(--bosque); font-size: 0.98rem; margin: 16px 0 8px; }
+  p.ayuda { color: #4A6A85; margin: 0 0 16px; }
+  label { display: block; font-weight: 700; font-size: 0.9rem; margin: 14px 0 6px; }
+  input, select { width: 100%; padding: 12px 14px; border: 2px solid var(--linea); border-radius: 12px; font-family: inherit; font-size: 1rem; }
+  button.primario {
+    width: 100%; background: var(--profundo); color: #fff; border: none; padding: 14px; border-radius: 999px;
+    font-family: 'Grandstander', sans-serif; font-weight: 600; font-size: 1rem; cursor: pointer; margin-top: 16px;
+    box-shadow: 0 4px 0 var(--profundo-oscuro);
+  }
+  button.secundario { background: none; border: 2px solid var(--linea); color: var(--profundo); padding: 8px 14px; border-radius: 999px; font-weight: 700; font-size: 0.85rem; cursor: pointer; margin-top: 10px; }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  .error { background: #FFF0EC; border: 2px solid #FFC4B5; color: #B94A2E; padding: 12px 14px; border-radius: 12px; margin-top: 12px; font-size: 0.9rem; }
+  .aviso { background: var(--hielo); border: 2px dashed var(--menta); border-radius: 12px; padding: 12px 14px; font-size: 0.9rem; color: var(--bosque); margin-bottom: 16px; }
+  .cargando { text-align: center; padding: 40px 20px; color: #4A6A85; }
+  .actividad-box { background: var(--hielo); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
+  .actividad-box .inteligencia { display: inline-block; background: var(--menta); color: #fff; font-size: 0.72rem; font-weight: 700; padding: 2px 10px; border-radius: 999px; margin-bottom: 6px; text-transform: uppercase; }
+  .trivia-item { border-top: 1px dashed var(--linea); padding: 12px 0; }
+  .trivia-item:first-child { border-top: none; }
+  .opciones { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; }
+  .opciones li { background: #fff; border: 2px solid var(--linea); border-radius: 10px; padding: 8px 12px; font-size: 0.92rem; }
+  .material-extra-box { background: #fff; border: 2px dashed var(--aqua); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
+  .respuestas-toggle { text-align: center; }
+  .respuestas-box { background: var(--hielo); border-radius: 12px; padding: 14px 16px; margin-top: 12px; display: none; }
+  .respuestas-box.abierto { display: block; }
+  .historial-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-top: 1px dashed var(--linea); gap: 10px; cursor: pointer; }
+  .historial-item:first-child { border-top: none; }
+  .historial-item .titulo { font-weight: 700; }
+  .historial-item .fecha { color: #4A6A85; font-size: 0.8rem; }
+  .volver { color: var(--profundo); font-weight: 700; text-decoration: none; display: inline-block; margin-bottom: 14px; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<header>
+  <a href="index.html"><span class="marca">Enseñ<span class="ai">AI</span></span></a>
+  <button id="btnSalir">Cerrar sesión</button>
+</header>
+
+<main id="contenido">
+  <div class="cargando">Cargando…</div>
+</main>
+
+<script>
+  const API_BASE = "https://ensenai-backend.onrender.com";
+  const SUPABASE_URL = "https://azslvqfgeghhzghfxmdh.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF6c2x2cWZnZWdoaHpnaGZ4bWRoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYzOTUzMzksImV4cCI6MjEwMTk3MTMzOX0.zd22nrf9OUrg0h2YnGJJt9mkKzoFERM54F4S48r-xEQ";
+  const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  const NIVELES = [
+    { value: "primaria_baja", label: "Primaria baja (6-8 años)" },
+    { value: "primaria_alta", label: "Primaria alta (9-12 años)" },
+    { value: "secundaria", label: "Secundaria (12-15 años)" },
+    { value: "preparatoria", label: "Preparatoria (15-18 años)" },
+    { value: "universidad", label: "Universidad / autodidacta (18+)" },
+  ];
+
+  const ETIQUETAS_INTELIGENCIA = {
+    linguistica: "Lingüística", logico_matematica: "Lógico-matemática", espacial: "Espacial",
+    musical: "Musical", kinestesica: "Corporal-kinestésica", interpersonal: "Interpersonal",
+    intrapersonal: "Intrapersonal", naturalista: "Naturalista",
+  };
+
+  let sesionActual = null;
+  let ultimoContenido = null;
+  let ultimoTemaId = null;
+
+  function escapeHtml(str) {
+    const d = document.createElement("div");
+    d.textContent = str || "";
+    return d.innerHTML;
+  }
+
+  async function init() {
+    const { data } = await supabaseClient.auth.getSession();
+    if (!data.session) {
+      window.location.href = "comprador.html?despues=tema";
+      return;
+    }
+    sesionActual = data.session;
+
+    document.getElementById("btnSalir").onclick = async () => {
+      await supabaseClient.auth.signOut();
+      window.location.href = "comprador.html";
+    };
+
+    mostrarFormulario();
+  }
+
+  function mostrarFormulario() {
+    document.getElementById("contenido").innerHTML = `
+      <div class="tarjeta">
+        <h1>✨ Genera material sobre un tema</h1>
+        <p class="ayuda">Escribe cualquier tema y lo adaptamos a tu edad y a tu forma de aprender.</p>
+        <label>Tema</label>
+        <input type="text" id="tema-input" placeholder="Ej. Las fracciones, La Revolución Mexicana, El sistema solar…">
+        <label>Nivel</label>
+        <select id="nivel-input">
+          ${NIVELES.map((n) => `<option value="${n.value}">${n.label}</option>`).join("")}
+        </select>
+        <button class="primario" id="btn-generar">Generar material</button>
+        <div id="resultado-generar"></div>
+      </div>
+      <div class="tarjeta">
+        <h2>Mis temas anteriores</h2>
+        <div id="lista-historial"><div class="cargando">Cargando…</div></div>
+      </div>
+    `;
+    document.getElementById("btn-generar").addEventListener("click", generarTema);
+    cargarHistorial();
+  }
+
+  async function generarTema() {
+    const tema = document.getElementById("tema-input").value.trim();
+    const nivel = document.getElementById("nivel-input").value;
+    const resultado = document.getElementById("resultado-generar");
+    resultado.innerHTML = "";
+
+    if (!tema) {
+      resultado.innerHTML = `<div class="error">Escribe sobre qué tema quieres generar material.</div>`;
+      return;
+    }
+
+    resultado.innerHTML = `<div class="cargando">Generando material con IA… puede tardar unos segundos.</div>`;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/temas/generar`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${sesionActual.access_token}` },
+        body: JSON.stringify({ tema, nivel, modo: "individual" }),
+      });
+      const data = await res.json();
+      if (res.status === 402) {
+        resultado.innerHTML = `
+          <div class="error">${escapeHtml(data.error)}</div>
+          <a href="comprador.html" style="display:block; text-decoration:none;"><button class="primario">Comprar créditos o suscribirme</button></a>
+        `;
+        return;
+      }
+      if (!res.ok) throw new Error(data.error || "No se pudo generar el material.");
+
+      mostrarTemaGenerado(data.contenido, data.tema_id, null);
+    } catch (err) {
+      resultado.innerHTML = `<div class="error">${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  async function cargarHistorial() {
+    const cont = document.getElementById("lista-historial");
+    try {
+      const res = await fetch(`${API_BASE}/api/temas/mios`, {
+        headers: { Authorization: `Bearer ${sesionActual.access_token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "No se pudo cargar tu historial.");
+
+      const temas = data.temas || [];
+      if (temas.length === 0) {
+        cont.innerHTML = `<p class="ayuda" style="margin:0;">Todavía no has generado ningún tema.</p>`;
+        return;
+      }
+
+      cont.innerHTML = temas
+        .map(
+          (t) => `
+        <div class="historial-item" data-id="${t.id}">
+          <span class="titulo">📘 ${escapeHtml(t.tema)}</span>
+          <span class="fecha">${new Date(t.created_at).toLocaleDateString("es-MX")}</span>
+        </div>
+      `
+        )
+        .join("");
+
+      cont.querySelectorAll(".historial-item").forEach((el) => {
+        el.addEventListener("click", () => verTemaDelHistorial(el.dataset.id));
+      });
+    } catch (err) {
+      cont.innerHTML = `<div class="error">No se pudo cargar tu historial.</div>`;
+    }
+  }
+
+  async function verTemaDelHistorial(temaId) {
+    document.getElementById("contenido").innerHTML = `<div class="cargando">Cargando tu tema…</div>`;
+    try {
+      const res = await fetch(`${API_BASE}/api/temas/mios/${temaId}`, {
+        headers: { Authorization: `Bearer ${sesionActual.access_token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "No se pudo cargar el tema.");
+
+      mostrarTemaGenerado(data.tema.contenido, data.tema.id, data.tema.pdf_url);
+    } catch (err) {
+      document.getElementById("contenido").innerHTML = `<div class="tarjeta"><div class="error">${escapeHtml(err.message)}</div></div>`;
+    }
+  }
+
+  function mostrarTemaGenerado(contenido, temaId, pdfUrlGuardado) {
+    ultimoContenido = contenido;
+    ultimoTemaId = temaId;
+    const c = contenido;
+    const cont = document.getElementById("contenido");
+
+    const actividadesHtml = c.actividades
+      ? c.actividades
+          .map(
+            (a) => `
+        <div class="actividad-box">
+          <span class="inteligencia">${escapeHtml(ETIQUETAS_INTELIGENCIA[a.inteligencia] || a.inteligencia)}</span>
+          <div style="font-weight:700; margin-bottom:4px;">${escapeHtml(a.titulo || "")}</div>
+          <div style="font-size:0.92rem; line-height:1.5;">${escapeHtml(a.instrucciones || "")}</div>
+        </div>
+      `
+          )
+          .join("")
+      : c.actividad
+      ? `
+        <div class="actividad-box">
+          <div style="font-weight:700; margin-bottom:4px;">${escapeHtml(c.actividad.titulo || "")}</div>
+          <div style="font-size:0.92rem; line-height:1.5;">${escapeHtml(c.actividad.instrucciones || "")}</div>
+        </div>
+      `
+      : "";
+
+    const triviaHtml = (c.trivia || [])
+      .map(
+        (p, i) => `
+      <div class="trivia-item">
+        <div style="font-weight:700;">${i + 1}. ${escapeHtml(p.pregunta || "")}</div>
+        ${
+          p.opciones?.length
+            ? `<ul class="opciones">${p.opciones.map((o) => `<li>${escapeHtml(o)}</li>`).join("")}</ul>`
+            : ""
+        }
+      </div>
+    `
+      )
+      .join("");
+
+    const materialExtraHtml = (c.material_extra || [])
+      .map(
+        (m) => `
+      <div class="material-extra-box">
+        <div style="font-weight:700; text-transform:capitalize; margin-bottom:4px;">${escapeHtml(m.tipo || "")}</div>
+        <div style="font-size:0.92rem; line-height:1.5; white-space:pre-line;">${escapeHtml(m.contenido || "")}</div>
+      </div>
+    `
+      )
+      .join("");
+
+    const r = c.respuestas || {};
+    const respuestasHtml = `
+      ${
+        r.trivia_resuelta?.length
+          ? `<h3 style="margin-top:0;">Respuestas de la trivia</h3>` +
+            r.trivia_resuelta.map((rt) => `<p style="margin:4px 0;"><strong>${escapeHtml(rt.pregunta)}</strong> — ${escapeHtml(rt.respuesta)}</p>`).join("")
+          : ""
+      }
+      ${r.solucion_actividad ? `<h3>Solución de la actividad</h3><p style="margin:0;">${escapeHtml(r.solucion_actividad)}</p>` : ""}
+      ${
+        r.conceptos_clave?.length
+          ? `<h3>Conceptos clave</h3><ul>${r.conceptos_clave.map((k) => `<li>${escapeHtml(k)}</li>`).join("")}</ul>`
+          : ""
+      }
+      ${r.autoevaluacion ? `<h3>Autoevaluación</h3><p style="margin:0;">${escapeHtml(r.autoevaluacion)}</p>` : ""}
+    `;
+
+    cont.innerHTML = `
+      <a class="volver" id="btn-volver">← Volver</a>
+      <div class="tarjeta">
+        <h1>📘 ${escapeHtml(c.tema || "")}</h1>
+        ${c.resumen ? `<p class="ayuda" style="line-height:1.6;">${escapeHtml(c.resumen)}</p>` : ""}
+        ${c.esquema_visual ? `<h3>Esquema visual</h3><p style="white-space:pre-line; line-height:1.6; margin:0;">${escapeHtml(c.esquema_visual)}</p>` : ""}
+        <button class="secundario" id="btn-pdf" style="margin-top:14px; width:100%;">${pdfUrlGuardado ? "📄 Descargar imprimible (PDF)" : "📄 Generar imprimible (PDF)"}</button>
+      </div>
+
+      ${actividadesHtml ? `<div class="tarjeta"><h2>✏️ Actividad</h2>${actividadesHtml}</div>` : ""}
+
+      ${triviaHtml ? `<div class="tarjeta"><h2>🧠 Trivia</h2>${triviaHtml}</div>` : ""}
+
+      ${materialExtraHtml ? `<div class="tarjeta"><h2>📎 Material extra</h2>${materialExtraHtml}</div>` : ""}
+
+      <div class="tarjeta">
+        <div class="respuestas-toggle"><button class="secundario" id="btn-respuestas">Ver respuestas</button></div>
+        <div class="respuestas-box" id="caja-respuestas">${respuestasHtml}</div>
+      </div>
+    `;
+
+    document.getElementById("btn-volver").addEventListener("click", mostrarFormulario);
+    document.getElementById("btn-respuestas").addEventListener("click", () => {
+      document.getElementById("caja-respuestas").classList.toggle("abierto");
+    });
+
+    let pdfUrlCache = pdfUrlGuardado || null;
+    const btnPdf = document.getElementById("btn-pdf");
+    btnPdf.addEventListener("click", async () => {
+      if (pdfUrlCache) {
+        window.open(pdfUrlCache, "_blank");
+        return;
+      }
+      const textoOriginal = btnPdf.textContent;
+      btnPdf.disabled = true;
+      btnPdf.textContent = "Preparando PDF…";
+      try {
+        const res = await fetch(`${API_BASE}/api/temas/pdf`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${sesionActual.access_token}` },
+          body: JSON.stringify({ contenido: ultimoContenido, modo: "individual", temaId: ultimoTemaId }),
+        });
+        const data = await res.json();
+        if (!data.pdf_url) throw new Error(data.error || "No se pudo generar el PDF.");
+        pdfUrlCache = data.pdf_url;
+        window.open(pdfUrlCache, "_blank");
+        btnPdf.textContent = "📄 Descargar imprimible (PDF)";
+      } catch (err) {
+        alert("Error: " + err.message);
+        btnPdf.textContent = textoOriginal;
+      } finally {
+        btnPdf.disabled = false;
+      }
+    });
+  }
+
+  init();
+</script>
+</body>
+</html>
