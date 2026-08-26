@@ -3,91 +3,57 @@ const fs = require("fs");
 const { generarMaterialTema } = require("../agents/generateTema");
 const { generarPdfTema } = require("../agents/pdfTema");
 const { requireBuyer } = require("../middleware/auth");
+const { obtenerPlanIndividual, inicioDeMes } = require("../utils/planes");
 const supabase = require("../db/supabase");
 
 const router = express.Router();
 
 /**
- * Decide cómo se cubre un tema individual nuevo (freemium/crédito/
- * suscripción) — ver db/schema_v20.sql y la sección "Precios y freemium"
- * de plan-pivote-lanzamiento.md. No aplica a modo "grupo" (ese tiene su
- * propio cobro vía grupo_temas/checkout, ver routes/grupos.js).
+ * Decide si el usuario puede generar un tema individual más este mes,
+ * según su plan (Gratis/Aprendemos/Ilimitado — ver utils/planes.js y
+ * db/schema_v22.sql). No aplica a modo "grupo" (ese tiene su propio cobro
+ * vía grupo_temas/checkout, ver routes/grupos.js).
  *
  * Regresa { permitido: true, origen } si puede generar, o
  * { permitido: false, error } con un mensaje listo para regresar al usuario.
  */
-async function resolverAccesoIndividual(userId, userCreatedAt) {
-  // 1. ¿Suscripción individual activa? → temas ilimitados.
-  const { data: suscripcion } = await supabase
-    .from("suscripciones")
-    .select("id")
-    .eq("user_id", userId)
-    .eq("tipo", "individual")
-    .eq("status", "activa")
-    .maybeSingle();
-  if (suscripcion) return { permitido: true, origen: "suscripcion" };
+async function resolverAccesoIndividual(userId) {
+  const plan = await obtenerPlanIndividual(userId);
 
-  // 2. ¿Le quedan temas gratis este mes? El límite depende de si se
-  // registró antes o después del cierre de la promo de lanzamiento —
-  // se compara contra su fecha de registro real, no hace falta guardar
-  // una bandera aparte.
-  const { data: settings, error: settingsError } = await supabase
-    .from("platform_settings")
-    .select("fecha_cierre_promo_lanzamiento, temas_gratis_ventana_lanzamiento, temas_gratis_normal, precio_tema_suelto_mxn")
-    .eq("id", 1)
-    .single();
-  if (settingsError) throw new Error(settingsError.message);
-
-  const esVentanaLanzamiento = new Date(userCreatedAt) < new Date(settings.fecha_cierre_promo_lanzamiento);
-  const limiteGratis = esVentanaLanzamiento ? settings.temas_gratis_ventana_lanzamiento : settings.temas_gratis_normal;
-
-  const inicioMes = new Date();
-  inicioMes.setDate(1);
-  inicioMes.setHours(0, 0, 0, 0);
+  if (plan.limite_temas_mes === null) {
+    return { permitido: true, origen: plan.nivel }; // ilimitado
+  }
 
   const { count, error: countError } = await supabase
     .from("mis_temas")
     .select("id", { count: "exact", head: true })
     .eq("user_id", userId)
-    .gte("created_at", inicioMes.toISOString());
+    .gte("created_at", inicioDeMes().toISOString());
   if (countError) throw new Error(countError.message);
 
-  if ((count || 0) < limiteGratis) return { permitido: true, origen: "gratis" };
-
-  // 3. Sin gratis disponible — ¿tiene créditos comprados? (mismo sistema
-  // de credit_batches ya usado para cursos — 1 tema = 1 crédito).
-  const { data: batches, error: batchError } = await supabase
-    .from("credit_batches")
-    .select("id, credits_remaining")
-    .eq("user_id", userId)
-    .eq("stripe_payment_status", "pagado")
-    .gt("credits_remaining", 0)
-    .order("purchased_at", { ascending: true })
-    .limit(1);
-  if (batchError) throw new Error(batchError.message);
-
-  if (batches?.length) {
-    // No descontamos el crédito aquí todavía — solo hasta que la
-    // generación con IA termine bien (ver POST /generar), para no
-    // cobrarle un crédito a alguien si la generación falla.
-    return { permitido: true, origen: "credito", batchIdADescontar: batches[0].id, creditosRestantesBatch: batches[0].credits_remaining };
+  if ((count || 0) < plan.limite_temas_mes) {
+    return { permitido: true, origen: plan.nivel };
   }
 
   return {
     permitido: false,
-    error: `Ya usaste tus ${limiteGratis} temas gratis de este mes. Compra un paquete de créditos (desde $${settings.precio_tema_suelto_mxn} MXN) o suscríbete para generar temas ilimitados.`,
+    error:
+      plan.nivel === "gratis"
+        ? `Ya usaste tus ${plan.limite_temas_mes} temas gratis de este mes. Mejora tu plan para seguir generando (Aprendemos: 20 temas/mes por $79 MXN, o Ilimitado por $129 MXN/mes).`
+        : `Ya usaste los ${plan.limite_temas_mes} temas de tu plan Aprendemos este mes. Cambia a Ilimitado para generar sin límite.`,
   };
 }
 
 /**
  * POST /api/temas/generar
- * body: { tema, nivel, modo? }
- * modo "individual" (default): usa el perfil de inteligencia dominante
- * guardado en perfiles_aprendizaje (si el usuario ya hizo el test — si no,
- * perfil balanceado por default) y genera UNA actividad combinada.
+ * body: { tema, nivel, modo?, perfilId? }
+ * modo "individual" (default): usa el perfil indicado en `perfilId` (uno
+ * de los que regresa GET /api/aprendizaje/perfiles) para su inteligencia
+ * dominante — si no se manda o no existe, usa un perfil balanceado por
+ * default. Genera UNA actividad combinada.
  * modo "grupo": pensado para la liga de grupo (maestros/psicólogos) —
  * genera una tabla con UNA actividad por cada una de las 8 inteligencias,
- * porque un salón/grupo tiene perfiles mezclados.
+ * porque un salón/grupo tiene perfiles mezclados. Ignora perfilId.
  *
  * En modo individual, el tema se guarda automáticamente en `mis_temas`
  * (historial personal — ver GET /mios) para que se pueda volver a ver o
@@ -98,7 +64,7 @@ async function resolverAccesoIndividual(userId, userCreatedAt) {
  */
 router.post("/generar", requireBuyer, async (req, res) => {
   try {
-    const { tema, nivel, modo } = req.body;
+    const { tema, nivel, modo, perfilId } = req.body;
     if (!tema) return res.status(400).json({ error: "Falta tema." });
     const nivelesValidos = ["preescolar", "primaria_baja", "primaria_alta", "secundaria", "preparatoria", "universidad"];
     if (!nivelesValidos.includes(nivel)) {
@@ -106,11 +72,12 @@ router.post("/generar", requireBuyer, async (req, res) => {
     }
     const modoFinal = modo === "grupo" ? "grupo" : "individual";
 
-    let perfilDominante = ["linguistica"]; // default balanceado si no ha hecho el test (ignorado en modo grupo)
-    if (modoFinal === "individual" && supabase) {
+    let perfilDominante = ["linguistica"]; // default balanceado si no se indica perfil (ignorado en modo grupo)
+    if (modoFinal === "individual" && supabase && perfilId) {
       const { data: perfil } = await supabase
         .from("perfiles_aprendizaje")
         .select("inteligencia_dominante")
+        .eq("id", perfilId)
         .eq("user_id", req.user.id)
         .maybeSingle();
       if (perfil?.inteligencia_dominante?.length) {
@@ -118,28 +85,18 @@ router.post("/generar", requireBuyer, async (req, res) => {
       }
     }
 
-    // El freemium (temas gratis/mes → crédito → suscripción) solo aplica
-    // al modo individual. El modo grupo se cobra aparte, por tema-grupo o
-    // suscripción de grupo, al agregarlo a la liga (ver routes/grupos.js).
+    // El límite de generaciones/mes (Gratis/Aprendemos/Ilimitado) solo
+    // aplica al modo individual. El modo grupo se cobra aparte, por
+    // tema-grupo o suscripción de grupo, al agregarlo a la liga (ver
+    // routes/grupos.js).
     let origen = null;
-    let accesoIndividual = null;
     if (modoFinal === "individual" && supabase) {
-      accesoIndividual = await resolverAccesoIndividual(req.user.id, req.user.created_at);
-      if (!accesoIndividual.permitido) return res.status(402).json({ error: accesoIndividual.error });
-      origen = accesoIndividual.origen;
+      const acceso = await resolverAccesoIndividual(req.user.id);
+      if (!acceso.permitido) return res.status(402).json({ error: acceso.error });
+      origen = acceso.origen;
     }
 
     const contenido = await generarMaterialTema(tema, nivel, perfilDominante, modoFinal);
-
-    // Recién ahora que la generación con IA terminó bien descontamos el
-    // crédito (si aplicaba) — así una falla de la IA no le cuesta un
-    // crédito al usuario.
-    if (origen === "credito" && supabase) {
-      await supabase
-        .from("credit_batches")
-        .update({ credits_remaining: accesoIndividual.creditosRestantesBatch - 1 })
-        .eq("id", accesoIndividual.batchIdADescontar);
-    }
 
     let temaId = null;
     if (modoFinal === "individual" && supabase) {
@@ -150,8 +107,8 @@ router.post("/generar", requireBuyer, async (req, res) => {
         .single();
       if (!guardarError) temaId = guardado.id;
       // si falla el guardado no bloqueamos la respuesta — el usuario ya
-      // pagó/gastó el tema generado y debe poder verlo aunque no quede
-      // en su historial
+      // gastó el tema generado y debe poder verlo aunque no quede en su
+      // historial
     }
 
     res.json({
@@ -162,6 +119,30 @@ router.post("/generar", requireBuyer, async (req, res) => {
       origen,
       contenido,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/temas/mi-plan
+ * Regresa el plan individual activo del usuario (Gratis/Aprendemos/
+ * Ilimitado — ver utils/planes.js) junto con cuántos temas ha generado
+ * este mes, para que el frontend (comprador.html) muestre "12/20 temas
+ * este mes" y ofrezca subir de plan si aplica.
+ */
+router.get("/mi-plan", requireBuyer, async (req, res) => {
+  if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
+  try {
+    const plan = await obtenerPlanIndividual(req.user.id);
+    const { count, error: countError } = await supabase
+      .from("mis_temas")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", req.user.id)
+      .gte("created_at", inicioDeMes().toISOString());
+    if (countError) throw new Error(countError.message);
+
+    res.json({ ...plan, usados_este_mes: count || 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

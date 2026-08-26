@@ -10,6 +10,14 @@ function getStripe() {
   return new Stripe(process.env.STRIPE_SECRET_KEY);
 }
 
+/**
+ * POST /api/purchases/checkout
+ * NOTA (26 de agosto): los créditos sueltos quedaron reemplazados por los
+ * 3 planes de suscripción (Gratis/Aprendemos/Ilimitado — ver
+ * utils/planes.js y POST /checkout-suscripcion). Esta ruta se deja sin
+ * borrar por si algún crédito viejo sigue pendiente de canjear, pero ya no
+ * se ofrece en el frontend.
+ */
 router.post("/checkout", requireBuyer, async (req, res) => {
   try {
     const { creditPackId } = req.body;
@@ -105,59 +113,57 @@ router.post("/checkout-bundle", requireBuyer, async (req, res) => {
 
 /**
  * POST /api/purchases/checkout-suscripcion
- * body: { tipo: "individual"|"grupo", plan: "mensual"|"anual" }
- * Crea una sesión de Stripe Checkout en modo "subscription" (recurrente).
- * El plan "anual" cobra una sola exhibición al año; "grupo" por ahora solo
- * existe mensual.
+ * body: { tipo: "individual"|"grupo", nivel: "aprendemos"|"ilimitado" }
+ * Crea una sesión de Stripe Checkout en modo "subscription" (recurrente),
+ * por el precio del nivel elegido (ver utils/planes.js / schema_v22.sql —
+ * reemplaza el modelo anterior de precio de fundador por fecha de registro,
+ * schema_v20/v21). Solo mensual por ahora — no hay precio anual definido
+ * para los nuevos niveles.
  *
- * Precio de fundador: si el usuario se registró antes del cierre de la
- * promo de lanzamiento (platform_settings.fecha_cierre_promo_lanzamiento —
- * la MISMA fecha que ya define el freemium de 3 temas gratis, ver
- * schema_v20.sql), el plan mensual (individual o grupo) se le cobra al
- * precio de fundador — y como Stripe cobra las renovaciones al mismo monto
- * con el que se creó la suscripción, ese precio queda congelado para
- * siempre mientras no cancele. El plan anual no tiene precio de fundador
- * distinto por ahora.
+ * Nota sobre el precio "de lanzamiento": Claudia decidió mostrar estos
+ * precios ($79/$109 Aprendemos, $129/$159 Ilimitado) como el precio actual
+ * (ya con ~40% de descuento vs. lo que podrían costar más adelante si el
+ * piloto valida demanda), sin fecha de corte — el ajuste, si se da, será
+ * manual en platform_settings el día que se decida. Como Stripe cobra las
+ * renovaciones al mismo monto con el que se creó la suscripción, quien se
+ * suscriba ahora queda en ese precio mientras no cancele, aunque el precio
+ * de lista suba después.
  */
 router.post("/checkout-suscripcion", requireBuyer, async (req, res) => {
   try {
-    const { tipo, plan } = req.body;
+    const { tipo, nivel } = req.body;
     if (!["individual", "grupo"].includes(tipo)) {
       return res.status(400).json({ error: "tipo debe ser 'individual' o 'grupo'." });
     }
-    if (!["mensual", "anual"].includes(plan)) {
-      return res.status(400).json({ error: "plan debe ser 'mensual' o 'anual'." });
-    }
-    if (tipo === "grupo" && plan === "anual") {
-      return res.status(400).json({ error: "El plan de grupo por ahora solo está disponible mensual." });
+    if (!["aprendemos", "ilimitado"].includes(nivel)) {
+      return res.status(400).json({ error: "nivel debe ser 'aprendemos' o 'ilimitado'." });
     }
 
-    const { data: settings, error: settingsError } = await supabase
-      .from("platform_settings")
-      .select(
-        "suscripcion_individual_mensual_mxn, suscripcion_individual_anual_mxn, suscripcion_grupo_mensual_mxn, " +
-          "suscripcion_individual_mensual_founder_mxn, suscripcion_grupo_mensual_founder_mxn, fecha_cierre_promo_lanzamiento"
-      )
-      .eq("id", 1)
-      .single();
-    if (settingsError) throw new Error(settingsError.message);
+    // Nota: no usamos obtenerPlanIndividual/obtenerPlanGrupo aquí — esas
+    // funciones regresan el plan ACTIVO del usuario, no el nivel que está
+    // pidiendo comprar (puede ser un upgrade/downgrade), así que el precio
+    // se calcula directo desde platform_settings según `tipo`+`nivel`.
+    const settingsRes = await supabase.from("platform_settings").select("*").eq("id", 1).single();
+    if (settingsRes.error) throw new Error(settingsRes.error.message);
+    const settings = settingsRes.data;
 
-    const esFounder = plan === "mensual" && new Date(req.user.created_at) < new Date(settings.fecha_cierre_promo_lanzamiento);
-
-    let amountMxn, interval, label;
-    if (tipo === "individual" && plan === "mensual") {
-      amountMxn = esFounder ? settings.suscripcion_individual_mensual_founder_mxn : settings.suscripcion_individual_mensual_mxn;
-      interval = "month";
-      label = `Suscripción individual — mensual${esFounder ? " (precio de fundador)" : ""}`;
-    } else if (tipo === "individual" && plan === "anual") {
-      amountMxn = settings.suscripcion_individual_anual_mxn;
-      interval = "year";
-      label = "Suscripción individual — anual";
+    let amountMxn, limiteLabel;
+    if (tipo === "individual" && nivel === "aprendemos") {
+      amountMxn = settings.plan_individual_aprendemos_precio_mxn;
+      limiteLabel = `${settings.plan_individual_aprendemos_limite_temas} temas/mes, hasta ${settings.plan_individual_aprendemos_limite_perfiles} perfiles`;
+    } else if (tipo === "individual" && nivel === "ilimitado") {
+      amountMxn = settings.plan_individual_ilimitado_precio_mxn;
+      limiteLabel = `temas ilimitados, hasta ${settings.plan_individual_ilimitado_limite_perfiles} perfiles`;
+    } else if (tipo === "grupo" && nivel === "aprendemos") {
+      amountMxn = settings.plan_grupo_aprendemos_precio_mxn;
+      limiteLabel = `${settings.plan_grupo_aprendemos_limite_temas} temas-grupo/mes, hasta ${settings.plan_grupo_aprendemos_limite_grupos} grupos`;
     } else {
-      amountMxn = esFounder ? settings.suscripcion_grupo_mensual_founder_mxn : settings.suscripcion_grupo_mensual_mxn;
-      interval = "month";
-      label = `Suscripción de grupo — mensual${esFounder ? " (precio de fundador)" : ""}`;
+      amountMxn = settings.plan_grupo_ilimitado_precio_mxn;
+      limiteLabel = `temas-grupo ilimitados, hasta ${settings.plan_grupo_ilimitado_limite_grupos} grupos`;
     }
+
+    const nivelLabel = nivel === "aprendemos" ? "Aprendemos" : "Ilimitado";
+    const label = `Plan ${nivelLabel} — ${tipo === "individual" ? "individual" : "grupo"} (${limiteLabel})`;
 
     const stripe = getStripe();
     const session = await stripe.checkout.sessions.create({
@@ -169,12 +175,12 @@ router.post("/checkout-suscripcion", requireBuyer, async (req, res) => {
             currency: "mxn",
             product_data: { name: `EnseñAI — ${label}` },
             unit_amount: Math.round(amountMxn * 100),
-            recurring: { interval },
+            recurring: { interval: "month" },
           },
           quantity: 1,
         },
       ],
-      metadata: { type: "suscripcion", tipo, plan, user_id: req.user.id, es_founder: String(esFounder), precio_mxn: String(amountMxn) },
+      metadata: { type: "suscripcion", tipo, nivel, user_id: req.user.id, precio_mxn: String(amountMxn) },
       success_url:
         tipo === "grupo"
           ? `${process.env.FRONTEND_URL}/grupo.html?suscripcion=exitosa`

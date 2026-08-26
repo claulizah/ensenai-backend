@@ -47,7 +47,7 @@ async function stripeWebhookHandler(req, res) {
  * (por default solo suele venir marcado checkout.session.completed).
  */
 async function procesarInicioSuscripcion(session) {
-  const { user_id, tipo, plan, es_founder, precio_mxn } = session.metadata;
+  const { user_id, tipo, nivel, precio_mxn } = session.metadata;
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
   const subscription = await stripe.subscriptions.retrieve(session.subscription);
 
@@ -55,12 +55,11 @@ async function procesarInicioSuscripcion(session) {
     {
       user_id,
       tipo,
-      plan,
+      nivel,
       stripe_customer_id: session.customer,
       stripe_subscription_id: session.subscription,
       status: "activa",
       current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
-      es_founder: es_founder === "true",
       precio_mxn: precio_mxn ? Number(precio_mxn) : null,
     },
     { onConflict: "stripe_subscription_id" }

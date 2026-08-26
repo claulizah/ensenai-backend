@@ -2,6 +2,7 @@ const express = require("express");
 const Stripe = require("stripe");
 const { slugify } = require("../utils/slugify");
 const { requireBuyer } = require("../middleware/auth");
+const { obtenerPlanGrupo, inicioDeMes } = require("../utils/planes");
 const supabase = require("../db/supabase");
 
 const router = express.Router();
@@ -32,13 +33,27 @@ function requireSupabase(res) {
  * POST /api/grupos
  * body: { nombre, mostrarNombres?, limiteAlumnos? }
  * Crea un grupo nuevo para el profesional autenticado. Un profesional
- * puede tener varios grupos (ej. varios salones).
+ * puede tener varios grupos (ej. varios salones), hasta el límite de su
+ * plan (Gratis 1, Aprendemos 3, Ilimitado 6 — ver utils/planes.js).
  */
 router.post("/", requireBuyer, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
     const { nombre, mostrarNombres, limiteAlumnos } = req.body;
     if (!nombre) return res.status(400).json({ error: "Falta nombre del grupo." });
+
+    const plan = await obtenerPlanGrupo(req.user.id);
+    const { count: gruposActuales, error: countError } = await supabase
+      .from("grupos")
+      .select("id", { count: "exact", head: true })
+      .eq("profesional_id", req.user.id);
+    if (countError) throw new Error(countError.message);
+
+    if ((gruposActuales || 0) >= plan.limite_grupos) {
+      return res.status(402).json({
+        error: `Tu plan actual (${plan.nivel}) permite hasta ${plan.limite_grupos} grupo(s). Mejora tu plan para crear más.`,
+      });
+    }
 
     const { data, error } = await supabase
       .from("grupos")
@@ -54,6 +69,44 @@ router.post("/", requireBuyer, async (req, res) => {
     if (error) throw new Error(error.message);
 
     res.json({ status: "grupo_creado", grupo: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/grupos/mi-plan
+ * Regresa el plan de grupo activo del profesional (Gratis/Aprendemos/
+ * Ilimitado — ver utils/planes.js), cuántos grupos tiene creados y cuántos
+ * temas-grupo ha cubierto su plan este mes, para mostrar el estado en
+ * grupo.html y ofrecer subir de plan si aplica.
+ */
+router.get("/mi-plan", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const plan = await obtenerPlanGrupo(req.user.id);
+
+    const { count: gruposActuales, error: gruposError } = await supabase
+      .from("grupos")
+      .select("id", { count: "exact", head: true })
+      .eq("profesional_id", req.user.id);
+    if (gruposError) throw new Error(gruposError.message);
+
+    let usadosEsteMes = 0;
+    if (plan.nivel !== "gratis") {
+      const { data: misGrupos } = await supabase.from("grupos").select("id").eq("profesional_id", req.user.id);
+      const idsMisGrupos = (misGrupos || []).map((g) => g.id);
+      const { count, error: usadosError } = await supabase
+        .from("grupo_temas")
+        .select("id", { count: "exact", head: true })
+        .in("grupo_id", idsMisGrupos)
+        .eq("pago_status", "cubierto_suscripcion")
+        .gte("created_at", inicioDeMes().toISOString());
+      if (usadosError) throw new Error(usadosError.message);
+      usadosEsteMes = count || 0;
+    }
+
+    res.json({ ...plan, grupos_actuales: gruposActuales || 0, temas_usados_este_mes: usadosEsteMes });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -121,16 +174,23 @@ router.get("/mios", requireBuyer, async (req, res) => {
 
 /**
  * POST /api/grupos/:id/temas
- * body: { titulo, contenido, esPrimerTemaGratis? }
+ * body: { titulo, contenido, esPrimerTemaGratis?, pdfUrl? }
  * Agrega un tema ya generado (ver prompt de generación, pieza aparte) a la
  * liga del grupo. El primer tema de un grupo puede marcarse como
- * "gratis_prueba" (piloto); los siguientes quedan "pendiente" hasta que se
- * conecte el cobro (Stripe checkout — pieza pendiente, ver plan-pivote).
+ * "gratis_prueba" (piloto). Los siguientes se cubren automáticamente
+ * ("cubierto_suscripcion") si el profesional tiene un plan de grupo activo
+ * y no ha llegado a su tope mensual (Aprendemos: 20 temas-grupo/mes,
+ * Ilimitado: sin tope); si no, quedan "pendiente" hasta pagarse suelto vía
+ * Stripe checkout (ver POST /temas/:temaId/checkout).
+ * pdfUrl (opcional) se guarda junto con el tema para que la página pública
+ * (g.html, sin cuenta) pueda ofrecer el imprimible sin necesitar sesión —
+ * POST /api/temas/pdf sí requiere sesión, así que el profesional lo genera
+ * una vez al agregar el tema, no cada alumno por su cuenta.
  */
 router.post("/:id/temas", requireBuyer, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
-    const { titulo, contenido, esPrimerTemaGratis } = req.body;
+    const { titulo, contenido, esPrimerTemaGratis, pdfUrl } = req.body;
     if (!titulo || !contenido) return res.status(400).json({ error: "Faltan titulo y/o contenido." });
 
     const { data: grupo, error: grupoError } = await supabase
@@ -152,21 +212,36 @@ router.post("/:id/temas", requireBuyer, async (req, res) => {
     if (esPrimerTemaGratis || count === 0) {
       pagoStatus = "gratis_prueba";
     } else {
-      // ¿el profesional tiene una suscripción de grupo activa? si sí, el
-      // tema queda cubierto automáticamente, sin pasar por checkout.
-      const { data: suscripcion } = await supabase
-        .from("suscripciones")
-        .select("id")
-        .eq("user_id", req.user.id)
-        .eq("tipo", "grupo")
-        .eq("status", "activa")
-        .maybeSingle();
-      pagoStatus = suscripcion ? "cubierto_suscripcion" : "pendiente";
+      // ¿el profesional tiene un plan de grupo activo? si es Ilimitado, el
+      // tema queda cubierto sin más. Si es Aprendemos, cubierto solo si no
+      // ha llegado a su tope mensual de temas-grupo. Si no tiene plan (o ya
+      // llegó al tope), el tema queda "pendiente" — se paga suelto o se
+      // sube de plan.
+      const plan = await obtenerPlanGrupo(req.user.id);
+      if (plan.nivel === "ilimitado") {
+        pagoStatus = "cubierto_suscripcion";
+      } else if (plan.nivel === "aprendemos") {
+        const { data: misGrupos } = await supabase
+          .from("grupos")
+          .select("id")
+          .eq("profesional_id", req.user.id);
+        const idsMisGrupos = (misGrupos || []).map((g) => g.id);
+        const { count: usadosEsteMes, error: usadosError } = await supabase
+          .from("grupo_temas")
+          .select("id", { count: "exact", head: true })
+          .in("grupo_id", idsMisGrupos)
+          .eq("pago_status", "cubierto_suscripcion")
+          .gte("created_at", inicioDeMes().toISOString());
+        if (usadosError) throw new Error(usadosError.message);
+        pagoStatus = (usadosEsteMes || 0) < plan.limite_temas_mes ? "cubierto_suscripcion" : "pendiente";
+      } else {
+        pagoStatus = "pendiente";
+      }
     }
 
     const { data, error } = await supabase
       .from("grupo_temas")
-      .insert({ grupo_id: grupo.id, titulo, contenido, pago_status: pagoStatus })
+      .insert({ grupo_id: grupo.id, titulo, contenido, pago_status: pagoStatus, pdf_url: pdfUrl || null })
       .select()
       .single();
     if (error) throw new Error(error.message);
@@ -251,7 +326,7 @@ router.get("/publico/:slug", async (req, res) => {
 
     const { data: temas, error: temasError } = await supabase
       .from("grupo_temas")
-      .select("id, titulo, contenido, created_at")
+      .select("id, titulo, contenido, pdf_url, created_at")
       .eq("grupo_id", grupo.id)
       .neq("pago_status", "pendiente")
       .order("created_at", { ascending: false });

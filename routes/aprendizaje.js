@@ -1,6 +1,7 @@
 const express = require("express");
 const { preguntasPublicas, calcularResultado } = require("../utils/quizInteligencias");
 const { requireBuyer } = require("../middleware/auth");
+const { obtenerPlanIndividual } = require("../utils/planes");
 const supabase = require("../db/supabase");
 
 const router = express.Router();
@@ -27,58 +28,96 @@ router.get("/quiz", (req, res) => {
 });
 
 /**
- * POST /api/aprendizaje/resultado
- * body: { respuestas: [0,3,1,7,2,...] } — un índice (0-7) por pregunta, en
- * orden (12 respuestas). Requiere sesión de comprador. Calcula y GUARDA el
- * resultado (1 por cuenta por ahora — si ya existía, se reemplaza).
+ * GET /api/aprendizaje/perfiles
+ * Lista los perfiles de aprendizaje guardados en la cuenta (uno por
+ * persona — ej. un papá puede tener un perfil por cada hijo) junto con
+ * el límite de perfiles de su plan actual, para que el frontend sepa si
+ * puede agregar uno más.
  */
-router.post("/resultado", requireBuyer, async (req, res) => {
+router.get("/perfiles", requireBuyer, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
-    const { respuestas } = req.body;
-    if (!Array.isArray(respuestas) || respuestas.length !== 12) {
-      return res.status(400).json({ error: "Se necesitan las 12 respuestas." });
-    }
-
-    const resultado = calcularResultado(respuestas);
-
-    const { error } = await supabase.from("perfiles_aprendizaje").upsert(
-      {
-        user_id: req.user.id,
-        inteligencia_dominante: resultado.perfil_dominante,
-        porcentajes: resultado.porcentajes,
-        respuestas,
-        fecha: new Date().toISOString(),
-      },
-      { onConflict: "user_id" }
-    );
+    const { data, error } = await supabase
+      .from("perfiles_aprendizaje")
+      .select("id, nombre, inteligencia_dominante, porcentajes, fecha")
+      .eq("user_id", req.user.id)
+      .order("fecha", { ascending: true });
     if (error) throw new Error(error.message);
 
-    res.json({ status: "resultado_guardado", ...resultado });
+    const plan = await obtenerPlanIndividual(req.user.id);
+
+    res.json({ perfiles: data || [], limite_perfiles: plan.limite_perfiles, plan_nivel: plan.nivel });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 /**
- * GET /api/aprendizaje/mi-resultado
- * Requiere sesión de comprador. Regresa el resultado guardado, si existe.
+ * POST /api/aprendizaje/perfiles
+ * body: { nombre, respuestas: [0,3,1,7,2,...] } — 12 respuestas (índice
+ * 0-7 por pregunta). Crea un perfil NUEVO — ya no reemplaza el único
+ * perfil de la cuenta. Respeta el límite de perfiles del plan actual
+ * (Gratis 1, Aprendemos 3, Ilimitado 6).
  */
-router.get("/mi-resultado", requireBuyer, async (req, res) => {
+router.post("/perfiles", requireBuyer, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
+    const { nombre, respuestas } = req.body;
+    if (!nombre || !nombre.trim()) return res.status(400).json({ error: "Falta el nombre del perfil." });
+    if (!Array.isArray(respuestas) || respuestas.length !== 12) {
+      return res.status(400).json({ error: "Se necesitan las 12 respuestas." });
+    }
+
+    const plan = await obtenerPlanIndividual(req.user.id);
+    const { count, error: countError } = await supabase
+      .from("perfiles_aprendizaje")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", req.user.id);
+    if (countError) throw new Error(countError.message);
+
+    if ((count || 0) >= plan.limite_perfiles) {
+      return res.status(402).json({
+        error: `Tu plan actual (${plan.nivel}) permite hasta ${plan.limite_perfiles} perfil(es). Borra uno existente o mejora tu plan para agregar más.`,
+      });
+    }
+
+    const resultado = calcularResultado(respuestas);
+
     const { data, error } = await supabase
       .from("perfiles_aprendizaje")
-      .select("*")
-      .eq("user_id", req.user.id)
-      .maybeSingle();
+      .insert({
+        user_id: req.user.id,
+        nombre: nombre.trim(),
+        inteligencia_dominante: resultado.perfil_dominante,
+        porcentajes: resultado.porcentajes,
+        respuestas,
+      })
+      .select("id, nombre, inteligencia_dominante, porcentajes, fecha")
+      .single();
     if (error) throw new Error(error.message);
 
-    if (!data) return res.json({ tiene_resultado: false });
+    res.json({ status: "perfil_creado", perfil: data, ...resultado });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-    const detalle = calcularResultado(data.respuestas);
+/**
+ * DELETE /api/aprendizaje/perfiles/:id
+ * Borra un perfil propio — útil para liberar espacio cuando ya se llegó
+ * al límite del plan.
+ */
+router.delete("/perfiles/:id", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { error } = await supabase
+      .from("perfiles_aprendizaje")
+      .delete()
+      .eq("id", req.params.id)
+      .eq("user_id", req.user.id);
+    if (error) throw new Error(error.message);
 
-    res.json({ tiene_resultado: true, fecha: data.fecha, ...detalle });
+    res.json({ status: "perfil_borrado" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
