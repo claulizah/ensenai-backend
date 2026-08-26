@@ -22,6 +22,8 @@ async function stripeWebhookHandler(req, res) {
         await procesarCompraDePaquete(session);
       } else if (tipo === "suscripcion") {
         await procesarInicioSuscripcion(session);
+      } else if (tipo === "tema_grupo") {
+        await procesarPagoTemaGrupo(session);
       } else {
         await procesarCompraDeCreditos(session);
       }
@@ -79,6 +81,22 @@ async function procesarActualizacionSuscripcion(subscription) {
 /** Cancelación (por el usuario o por fallos de pago repetidos). */
 async function procesarCancelacionSuscripcion(subscription) {
   await supabase.from("suscripciones").update({ status: "cancelada" }).eq("stripe_subscription_id", subscription.id);
+}
+
+/**
+ * checkout.session.completed con metadata.type = "tema_grupo" — pago único
+ * de un tema de grupo que estaba "pendiente" (no era el primero gratis ni
+ * estaba cubierto por una suscripción de grupo activa). Marca el tema como
+ * "pagado" para que aparezca en la página pública del grupo (GET
+ * /api/grupos/publico/:slug ya filtra por pago_status != 'pendiente').
+ */
+async function procesarPagoTemaGrupo(session) {
+  const { grupo_tema_id } = session.metadata;
+
+  await supabase
+    .from("grupo_temas")
+    .update({ pago_status: "pagado", stripe_session_id: session.id })
+    .eq("id", grupo_tema_id);
 }
 
 async function procesarCompraDeCreditos(session) {

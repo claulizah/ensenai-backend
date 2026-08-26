@@ -1,9 +1,15 @@
 const express = require("express");
+const Stripe = require("stripe");
 const { slugify } = require("../utils/slugify");
 const { requireBuyer } = require("../middleware/auth");
 const supabase = require("../db/supabase");
 
 const router = express.Router();
+
+function getStripe() {
+  if (!process.env.STRIPE_SECRET_KEY) throw new Error("Falta STRIPE_SECRET_KEY en tu .env.");
+  return new Stripe(process.env.STRIPE_SECRET_KEY);
+}
 
 function requireSupabase(res) {
   if (!supabase) {
@@ -158,6 +164,63 @@ router.post("/:id/temas", requireBuyer, async (req, res) => {
     if (error) throw new Error(error.message);
 
     res.json({ status: "tema_agregado", tema: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/grupos/temas/:temaId/checkout
+ * Crea una sesión de Stripe Checkout (pago único) para activar un tema de
+ * grupo que quedó en pago_status "pendiente" — es decir, un tema que no es
+ * el primero gratis y que el profesional no tiene cubierto por una
+ * suscripción de grupo activa. Precio en platform_settings.precio_tema_grupo_mxn
+ * (por defecto $129 MXN, dentro del rango $99-149 definido en el plan).
+ */
+router.post("/temas/:temaId/checkout", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { data: tema, error: temaError } = await supabase
+      .from("grupo_temas")
+      .select("id, titulo, pago_status, grupo_id, grupos(profesional_id)")
+      .eq("id", req.params.temaId)
+      .single();
+    if (temaError || !tema) return res.status(404).json({ error: "Tema no encontrado." });
+    if (tema.grupos.profesional_id !== req.user.id) {
+      return res.status(403).json({ error: "Este tema no te pertenece." });
+    }
+    if (tema.pago_status !== "pendiente") {
+      return res.status(400).json({ error: `Este tema ya está en estado "${tema.pago_status}", no necesita pago.` });
+    }
+
+    const { data: settings, error: settingsError } = await supabase
+      .from("platform_settings")
+      .select("precio_tema_grupo_mxn")
+      .eq("id", 1)
+      .single();
+    if (settingsError) throw new Error(settingsError.message);
+    const precioMxn = settings.precio_tema_grupo_mxn || 129;
+
+    const stripe = getStripe();
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price_data: {
+            currency: "mxn",
+            product_data: { name: `EnseñAI — Tema de grupo: ${tema.titulo}` },
+            unit_amount: Math.round(precioMxn * 100),
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: { type: "tema_grupo", grupo_tema_id: tema.id, user_id: req.user.id },
+      success_url: `${process.env.FRONTEND_URL}/comprador.html?tema_grupo=activado`,
+      cancel_url: `${process.env.FRONTEND_URL}/comprador.html?tema_grupo=cancelado`,
+    });
+
+    res.json({ checkout_url: session.url });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
