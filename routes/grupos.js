@@ -76,17 +76,24 @@ router.get("/mios", requireBuyer, async (req, res) => {
 
     const grupoIds = (grupos || []).map((g) => g.id);
     let temasPorGrupo = {};
+    let listaTemasPorGrupo = {};
     let accesosPorGrupo = {};
 
     if (grupoIds.length > 0) {
       const { data: temas } = await supabase
         .from("grupo_temas")
-        .select("id, grupo_id, pago_status")
-        .in("grupo_id", grupoIds);
+        .select("id, grupo_id, titulo, pago_status, created_at")
+        .in("grupo_id", grupoIds)
+        .order("created_at", { ascending: false });
       (temas || []).forEach((t) => {
         temasPorGrupo[t.grupo_id] = temasPorGrupo[t.grupo_id] || { total: 0, activos: 0 };
         temasPorGrupo[t.grupo_id].total++;
         if (t.pago_status !== "pendiente") temasPorGrupo[t.grupo_id].activos++;
+        listaTemasPorGrupo[t.grupo_id] = listaTemasPorGrupo[t.grupo_id] || [];
+        // no se manda "contenido" completo aquí (puede pesar mucho) — solo
+        // lo necesario para que el profesional vea estado y pueda pagar los
+        // temas que quedaron "pendiente".
+        listaTemasPorGrupo[t.grupo_id].push({ id: t.id, titulo: t.titulo, pago_status: t.pago_status, created_at: t.created_at });
       });
 
       const { data: accesos } = await supabase
@@ -103,6 +110,7 @@ router.get("/mios", requireBuyer, async (req, res) => {
       temas_totales: temasPorGrupo[g.id]?.total || 0,
       temas_activos: temasPorGrupo[g.id]?.activos || 0,
       accesos_registrados: accesosPorGrupo[g.id] || 0,
+      temas: listaTemasPorGrupo[g.id] || [],
     }));
 
     res.json({ grupos: resultado });
