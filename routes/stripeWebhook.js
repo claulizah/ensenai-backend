@@ -13,22 +13,72 @@ async function stripeWebhookHandler(req, res) {
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  if (event.type === "checkout.session.completed") {
-    const session = event.data.object;
-    const tipo = session.metadata.type; // "credit_pack" | "bundle"
+  try {
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+      const tipo = session.metadata.type; // "credit_pack" | "bundle" | "suscripcion"
 
-    try {
       if (tipo === "bundle") {
         await procesarCompraDePaquete(session);
+      } else if (tipo === "suscripcion") {
+        await procesarInicioSuscripcion(session);
       } else {
         await procesarCompraDeCreditos(session);
       }
-    } catch (err) {
-      console.error("Error procesando pago confirmado:", err.message);
+    } else if (event.type === "customer.subscription.updated") {
+      await procesarActualizacionSuscripcion(event.data.object);
+    } else if (event.type === "customer.subscription.deleted") {
+      await procesarCancelacionSuscripcion(event.data.object);
     }
+  } catch (err) {
+    console.error("Error procesando evento de Stripe:", err.message);
   }
 
   res.json({ received: true });
+}
+
+/**
+ * checkout.session.completed con metadata.type = "suscripcion" — primer
+ * pago de una suscripción nueva (individual mensual/anual, o de grupo).
+ * IMPORTANTE: en el dashboard de Stripe, el webhook debe estar suscrito
+ * también a "customer.subscription.updated" y "customer.subscription.deleted"
+ * (por default solo suele venir marcado checkout.session.completed).
+ */
+async function procesarInicioSuscripcion(session) {
+  const { user_id, tipo, plan } = session.metadata;
+  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  const subscription = await stripe.subscriptions.retrieve(session.subscription);
+
+  await supabase.from("suscripciones").upsert(
+    {
+      user_id,
+      tipo,
+      plan,
+      stripe_customer_id: session.customer,
+      stripe_subscription_id: session.subscription,
+      status: "activa",
+      current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
+    },
+    { onConflict: "stripe_subscription_id" }
+  );
+}
+
+/** Renovación (o cambio de estado, ej. pago fallido) de una suscripción existente. */
+async function procesarActualizacionSuscripcion(subscription) {
+  const status = subscription.status === "active" ? "activa" : subscription.status === "past_due" ? "pago_fallido" : "activa";
+
+  await supabase
+    .from("suscripciones")
+    .update({
+      status,
+      current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
+    })
+    .eq("stripe_subscription_id", subscription.id);
+}
+
+/** Cancelación (por el usuario o por fallos de pago repetidos). */
+async function procesarCancelacionSuscripcion(subscription) {
+  await supabase.from("suscripciones").update({ status: "cancelada" }).eq("stripe_subscription_id", subscription.id);
 }
 
 async function procesarCompraDeCreditos(session) {

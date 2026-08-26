@@ -103,6 +103,96 @@ router.post("/checkout-bundle", requireBuyer, async (req, res) => {
   }
 });
 
+/**
+ * POST /api/purchases/checkout-suscripcion
+ * body: { tipo: "individual"|"grupo", plan: "mensual"|"anual" }
+ * Crea una sesión de Stripe Checkout en modo "subscription" (recurrente).
+ * El plan "anual" cobra una sola exhibición al año (equivalente a $120
+ * MXN/mes); "grupo" por ahora solo existe mensual.
+ */
+router.post("/checkout-suscripcion", requireBuyer, async (req, res) => {
+  try {
+    const { tipo, plan } = req.body;
+    if (!["individual", "grupo"].includes(tipo)) {
+      return res.status(400).json({ error: "tipo debe ser 'individual' o 'grupo'." });
+    }
+    if (!["mensual", "anual"].includes(plan)) {
+      return res.status(400).json({ error: "plan debe ser 'mensual' o 'anual'." });
+    }
+    if (tipo === "grupo" && plan === "anual") {
+      return res.status(400).json({ error: "El plan de grupo por ahora solo está disponible mensual." });
+    }
+
+    const { data: settings, error: settingsError } = await supabase
+      .from("platform_settings")
+      .select("suscripcion_individual_mensual_mxn, suscripcion_individual_anual_mxn, suscripcion_grupo_mensual_mxn")
+      .eq("id", 1)
+      .single();
+    if (settingsError) throw new Error(settingsError.message);
+
+    let amountMxn, interval, label;
+    if (tipo === "individual" && plan === "mensual") {
+      amountMxn = settings.suscripcion_individual_mensual_mxn;
+      interval = "month";
+      label = "Suscripción individual — mensual";
+    } else if (tipo === "individual" && plan === "anual") {
+      amountMxn = settings.suscripcion_individual_anual_mxn;
+      interval = "year";
+      label = "Suscripción individual — anual";
+    } else {
+      amountMxn = settings.suscripcion_grupo_mensual_mxn;
+      interval = "month";
+      label = "Suscripción de grupo — mensual";
+    }
+
+    const stripe = getStripe();
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      payment_method_types: ["card"],
+      line_items: [
+        {
+          price_data: {
+            currency: "mxn",
+            product_data: { name: `EnseñAI — ${label}` },
+            unit_amount: Math.round(amountMxn * 100),
+            recurring: { interval },
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: { type: "suscripcion", tipo, plan, user_id: req.user.id },
+      success_url: `${process.env.FRONTEND_URL}/comprador.html?suscripcion=exitosa`,
+      cancel_url: `${process.env.FRONTEND_URL}/comprador.html?suscripcion=cancelada`,
+    });
+
+    res.json({ checkout_url: session.url });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/purchases/mi-suscripcion
+ * Regresa la suscripción activa del usuario, si tiene una.
+ */
+router.get("/mi-suscripcion", requireBuyer, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("suscripciones")
+      .select("*")
+      .eq("user_id", req.user.id)
+      .eq("status", "activa")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+
+    res.json({ tiene_suscripcion_activa: !!data, suscripcion: data || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post("/redeem", requireBuyer, async (req, res) => {
   try {
     const { courseId } = req.body;

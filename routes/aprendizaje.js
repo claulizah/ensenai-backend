@@ -16,25 +16,28 @@ function requireSupabase(res) {
 }
 
 /**
- * GET /api/aprendizaje/quiz
+ * GET /api/aprendizaje/quiz?version=ninos|adulto
  * Público — regresa las preguntas del quiz de inteligencias múltiples.
+ * "ninos" (default): el papá/tutor describe a su hijo.
+ * "adulto": la persona se autoevalúa (adolescentes/adultos).
  */
 router.get("/quiz", (req, res) => {
-  res.json({ preguntas: preguntasPublicas() });
+  const version = req.query.version === "adulto" ? "adulto" : "ninos";
+  res.json({ version, preguntas: preguntasPublicas(version) });
 });
 
 /**
  * POST /api/aprendizaje/resultado
- * body: { respuestas: [0,3,1,7,2] } — un índice (0-7) por pregunta, en orden
- * Requiere sesión de comprador. Calcula y GUARDA el resultado (1 por cuenta
- * por ahora — si ya existía, se reemplaza).
+ * body: { respuestas: [0,3,1,7,2,...] } — un índice (0-7) por pregunta, en
+ * orden (12 respuestas). Requiere sesión de comprador. Calcula y GUARDA el
+ * resultado (1 por cuenta por ahora — si ya existía, se reemplaza).
  */
 router.post("/resultado", requireBuyer, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
     const { respuestas } = req.body;
-    if (!Array.isArray(respuestas) || respuestas.length !== 5) {
-      return res.status(400).json({ error: "Se necesitan las 5 respuestas." });
+    if (!Array.isArray(respuestas) || respuestas.length !== 12) {
+      return res.status(400).json({ error: "Se necesitan las 12 respuestas." });
     }
 
     const resultado = calcularResultado(respuestas);
@@ -42,7 +45,8 @@ router.post("/resultado", requireBuyer, async (req, res) => {
     const { error } = await supabase.from("perfiles_aprendizaje").upsert(
       {
         user_id: req.user.id,
-        inteligencia_dominante: resultado.dominantes,
+        inteligencia_dominante: resultado.perfil_dominante,
+        porcentajes: resultado.porcentajes,
         respuestas,
         fecha: new Date().toISOString(),
       },
