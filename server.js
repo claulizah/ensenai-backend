@@ -6,6 +6,8 @@ const creatorsRouter = require("./routes/creators");
 const purchasesRouter = require("./routes/purchases");
 const bundlesRouter = require("./routes/bundles");
 const aprendizajeRouter = require("./routes/aprendizaje");
+const gruposRouter = require("./routes/grupos");
+const temasRouter = require("./routes/temas");
 const { stripeWebhookHandler } = require("./routes/stripeWebhook");
 
 const app = express();
@@ -41,6 +43,8 @@ app.use("/api/creators", creatorsRouter);
 app.use("/api/purchases", purchasesRouter);
 app.use("/api/bundles", bundlesRouter);
 app.use("/api/aprendizaje", aprendizajeRouter);
+app.use("/api/grupos", gruposRouter);
+app.use("/api/temas", temasRouter);
 
 app.use((err, req, res, next) => {
   if (err.code === "LIMIT_FILE_SIZE") {
