@@ -34,7 +34,11 @@ app.use(
 
 app.post("/api/purchases/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
 
-app.use(express.json());
+// 12 MB: las fotos de resúmenes/apuntes que se mandan al generador de temas
+// viajan como base64 dentro del JSON (ver routes/temas.js). El frontend ya
+// las comprime antes de subirlas, pero el default de Express (100 KB) se
+// quedaba corto y devolvía un 413 sin mensaje útil.
+app.use(express.json({ limit: "12mb" }));
 
 app.get("/health", (req, res) => res.json({ status: "ok", service: "ensenai-backend" }));
 
@@ -49,6 +53,9 @@ app.use("/api/temas", temasRouter);
 app.use((err, req, res, next) => {
   if (err.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({ error: "El video es muy grande (máximo 200 MB, hasta ~10 minutos)." });
+  }
+  if (err.type === "entity.too.large") {
+    return res.status(413).json({ error: "Las fotos que subiste pesan demasiado. Intenta con menos fotos, o tómalas de nuevo con menor resolución." });
   }
   console.error(err);
   res.status(500).json({ error: err.message || "Error interno del servidor." });
