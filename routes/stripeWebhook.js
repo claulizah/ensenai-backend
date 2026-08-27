@@ -86,12 +86,18 @@ async function procesarInicioSuscripcion(session) {
       user_id,
       tipo,
       nivel,
-      // La tabla `suscripciones` exige la columna `plan` (NOT NULL). El
-      // valor correcto ya venía en `nivel` (ej. "ilimitado"), pero nunca se
-      // copiaba a la columna que la base de datos realmente usa — por eso
-      // el insert fallaba con "null value in column plan" y el pago se
-      // quedaba sin reflejarse aunque el webhook respondía 200 a Stripe.
-      plan: nivel,
+      // La tabla `suscripciones` tiene DOS columnas distintas: `plan`
+      // (NOT NULL, check in 'mensual'/'anual' — la FRECUENCIA de cobro,
+      // de schema_v16) y `nivel` (check in 'aprendemos'/'ilimitado' — el
+      // NIVEL del plan, de schema_v22). El código de abajo ya guardaba
+      // `nivel` bien; lo que nunca se guardó fue `plan`, y como es NOT
+      // NULL, el insert fallaba silenciosamente detrás de un 200 a Stripe.
+      // purchases.js crea toda suscripción con recurring:{interval:"month"}
+      // — no existe opción anual todavía — así que por ahora `plan` es
+      // siempre "mensual". (Un intento anterior de arreglar esto puso
+      // `nivel` en `plan` por error, lo cual violaba el check constraint
+      // porque "ilimitado"/"aprendemos" no son valores válidos de `plan`.)
+      plan: "mensual",
       stripe_customer_id: session.customer,
       stripe_subscription_id: session.subscription,
       status: "activa",
