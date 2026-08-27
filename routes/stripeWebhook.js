@@ -40,6 +40,36 @@ async function stripeWebhookHandler(req, res) {
 }
 
 /**
+ * Fecha de fin del periodo actual de una suscripción, en ISO.
+ *
+ * OJO — esto causó un bug de pago real: a partir de la versión de API
+ * 2025-08-27 (la que usa el SDK de Stripe v18), `current_period_end` YA NO
+ * existe al nivel de la suscripción; se movió a cada item
+ * (`subscription.items.data[0].current_period_end`).
+ *
+ * Con el código anterior, `subscription.current_period_end` llegaba como
+ * undefined, `new Date(undefined * 1000).toISOString()` lanzaba
+ * "RangeError: Invalid time value", el catch del webhook se lo tragaba y
+ * respondía 200 a Stripe — o sea: el cobro se hacía, Stripe daba el evento
+ * por entregado, y la suscripción NUNCA se guardaba. El usuario pagaba y
+ * seguía viendo "Plan Gratis".
+ *
+ * Esta función lee de los dos lugares y, si no encuentra ninguno, regresa
+ * null en vez de tronar: es preferible guardar la suscripción sin la fecha
+ * de renovación que perderla entera.
+ */
+function finDePeriodoISO(subscription) {
+  const epoch =
+    subscription?.current_period_end ??
+    subscription?.items?.data?.[0]?.current_period_end ??
+    null;
+
+  if (!epoch || !Number.isFinite(epoch)) return null;
+  const fecha = new Date(epoch * 1000);
+  return Number.isNaN(fecha.getTime()) ? null : fecha.toISOString();
+}
+
+/**
  * checkout.session.completed con metadata.type = "suscripcion" — primer
  * pago de una suscripción nueva (individual mensual/anual, o de grupo).
  * IMPORTANTE: en el dashboard de Stripe, el webhook debe estar suscrito
@@ -51,7 +81,7 @@ async function procesarInicioSuscripcion(session) {
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
   const subscription = await stripe.subscriptions.retrieve(session.subscription);
 
-  await supabase.from("suscripciones").upsert(
+  const { error } = await supabase.from("suscripciones").upsert(
     {
       user_id,
       tipo,
@@ -59,24 +89,28 @@ async function procesarInicioSuscripcion(session) {
       stripe_customer_id: session.customer,
       stripe_subscription_id: session.subscription,
       status: "activa",
-      current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
+      current_period_end: finDePeriodoISO(subscription),
       precio_mxn: precio_mxn ? Number(precio_mxn) : null,
     },
     { onConflict: "stripe_subscription_id" }
   );
+
+  // Si esto falla, alguien pagó y no tiene su plan: hay que poder verlo en
+  // los logs de Render sin tener que reproducir el pago.
+  if (error) {
+    throw new Error(`No se pudo guardar la suscripción de ${user_id} (${tipo}/${nivel}): ${error.message}`);
+  }
 }
 
 /** Renovación (o cambio de estado, ej. pago fallido) de una suscripción existente. */
 async function procesarActualizacionSuscripcion(subscription) {
   const status = subscription.status === "active" ? "activa" : subscription.status === "past_due" ? "pago_fallido" : "activa";
 
-  await supabase
-    .from("suscripciones")
-    .update({
-      status,
-      current_period_end: new Date(subscription.current_period_end * 1000).toISOString(),
-    })
-    .eq("stripe_subscription_id", subscription.id);
+  const cambios = { status };
+  const fin = finDePeriodoISO(subscription);
+  if (fin) cambios.current_period_end = fin; // no pisar la fecha buena con null
+
+  await supabase.from("suscripciones").update(cambios).eq("stripe_subscription_id", subscription.id);
 }
 
 /** Cancelación (por el usuario o por fallos de pago repetidos). */
