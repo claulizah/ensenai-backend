@@ -76,7 +76,7 @@ function normalizarEtiquetas(valor) {
 
 router.post("/generar", requireBuyer, async (req, res) => {
   try {
-    const { tema, nivel, modo, perfilId, etiquetas } = req.body;
+    const { tema, nivel, modo, perfilId, etiquetas, detalles, imagenes } = req.body;
     if (!tema) return res.status(400).json({ error: "Falta tema." });
     const nivelesValidos = ["preescolar", "primaria_baja", "primaria_alta", "secundaria", "preparatoria", "universidad"];
     if (!nivelesValidos.includes(nivel)) {
@@ -108,7 +108,10 @@ router.post("/generar", requireBuyer, async (req, res) => {
       origen = acceso.origen;
     }
 
-    const contenido = await generarMaterialTema(tema, nivel, perfilDominante, modoFinal);
+    // `detalles` (nota escrita) e `imagenes` (fotos de un resumen/apuntes)
+    // son opcionales — orientan la generación sin limitarla. Ver
+    // agents/generateTema.js, que valida y descarta imágenes mal formadas.
+    const contenido = await generarMaterialTema(tema, nivel, perfilDominante, modoFinal, { detalles, imagenes });
 
     let temaId = null;
     if (modoFinal === "individual" && supabase) {
