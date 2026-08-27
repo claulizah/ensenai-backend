@@ -86,6 +86,12 @@ async function procesarInicioSuscripcion(session) {
       user_id,
       tipo,
       nivel,
+      // La tabla `suscripciones` exige la columna `plan` (NOT NULL). El
+      // valor correcto ya venía en `nivel` (ej. "ilimitado"), pero nunca se
+      // copiaba a la columna que la base de datos realmente usa — por eso
+      // el insert fallaba con "null value in column plan" y el pago se
+      // quedaba sin reflejarse aunque el webhook respondía 200 a Stripe.
+      plan: nivel,
       stripe_customer_id: session.customer,
       stripe_subscription_id: session.subscription,
       status: "activa",
