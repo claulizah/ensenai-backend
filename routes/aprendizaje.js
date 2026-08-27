@@ -108,7 +108,7 @@ router.get("/perfiles", requireBuyer, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("perfiles_aprendizaje")
-      .select("id, nombre, inteligencia_dominante, porcentajes, fecha")
+      .select("id, nombre, inteligencia_dominante, porcentajes, fecha, avatar")
       .eq("user_id", req.user.id)
       .order("fecha", { ascending: true });
     if (error) throw new Error(error.message);
@@ -147,7 +147,7 @@ router.get("/perfiles", requireBuyer, async (req, res) => {
 router.post("/perfiles", requireBuyer, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
-    const { nombre, respuestas, dominante_manual } = req.body;
+    const { nombre, respuestas, dominante_manual, avatar } = req.body;
     if (!nombre || !nombre.trim()) return res.status(400).json({ error: "Falta el nombre del perfil." });
     if (!Array.isArray(respuestas) || respuestas.length !== 12) {
       return res.status(400).json({ error: "Se necesitan las 12 respuestas." });
@@ -180,11 +180,12 @@ router.post("/perfiles", requireBuyer, async (req, res) => {
       .insert({
         user_id: req.user.id,
         nombre: nombre.trim(),
+        avatar: typeof avatar === "string" && avatar.trim() ? avatar.trim().slice(0, 40) : null,
         inteligencia_dominante: dominanteFinal,
         porcentajes: resultado.porcentajes,
         respuestas,
       })
-      .select("id, nombre, inteligencia_dominante, porcentajes, fecha")
+      .select("id, nombre, inteligencia_dominante, porcentajes, fecha, avatar")
       .single();
     if (error) throw new Error(error.message);
 
@@ -195,6 +196,57 @@ router.post("/perfiles", requireBuyer, async (req, res) => {
       perfil_dominante: dominanteFinal,
       ajustado_a_mano: dominanteManual.length > 0,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /api/aprendizaje/perfiles/:id
+ * body: { nombre?, respuestas?, dominante_manual? }
+ *
+ * Actualiza un perfil existente en vez de obligar a borrarlo y crear otro.
+ * Importante para el plan Gratis: como solo permite 1 perfil, "borrar y
+ * volver a crear" dejaba a la persona temporalmente en cero, y si algo
+ * fallaba a media, sin perfil. Con esto se puede corregir el nombre o
+ * rehacer el quiz (porque el niño creció, cambió, o se contestó a la
+ * ligera) sin tocar el límite del plan.
+ */
+router.put("/perfiles/:id", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { nombre, respuestas, dominante_manual, avatar } = req.body;
+    const cambios = {};
+
+    if (typeof nombre === "string" && nombre.trim()) cambios.nombre = nombre.trim();
+    if (typeof avatar === "string" && avatar.trim()) cambios.avatar = avatar.trim().slice(0, 40);
+
+    let resultado = null;
+    if (Array.isArray(respuestas) && respuestas.length === 12) {
+      resultado = calcularResultado(respuestas);
+      const dominanteManual = Array.isArray(dominante_manual)
+        ? [...new Set(dominante_manual.filter((t) => TIPOS.includes(t)))].slice(0, 2)
+        : [];
+      cambios.inteligencia_dominante = dominanteManual.length ? dominanteManual : resultado.perfil_dominante;
+      cambios.porcentajes = resultado.porcentajes;
+      cambios.respuestas = respuestas;
+    }
+
+    if (!Object.keys(cambios).length) {
+      return res.status(400).json({ error: "No mandaste nada que actualizar." });
+    }
+
+    const { data, error } = await supabase
+      .from("perfiles_aprendizaje")
+      .update(cambios)
+      .eq("id", req.params.id)
+      .eq("user_id", req.user.id) // nunca se puede tocar el perfil de otra cuenta
+      .select("id, nombre, inteligencia_dominante, porcentajes, fecha, avatar")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return res.status(404).json({ error: "No encontramos ese perfil en tu cuenta." });
+
+    res.json({ status: "perfil_actualizado", perfil: data, ...(resultado || {}) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
