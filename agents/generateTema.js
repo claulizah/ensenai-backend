@@ -105,7 +105,7 @@ const TECNICAS_POR_NIVEL = {
  * mezclados, así que se genera UNA actividad por cada una de las 8
  * inteligencias (tabla completa), no solo la(s) dominante(s) de una persona.
  */
-function buildPrompt(tema, nivel, perfilDominante, modo = "individual") {
+function buildPrompt(tema, nivel, perfilDominante, modo = "individual", detalles = "", tieneImagenes = false) {
   const nivelLabel = ETIQUETAS_NIVEL[nivel] || "Primaria alta";
   const edadLabel = EDAD_APROX[nivel] || "9-12";
 
@@ -122,7 +122,26 @@ function buildPrompt(tema, nivel, perfilDominante, modo = "individual") {
     ? `\n\nReferencia de qué tan concretas deben ser las técnicas para esta edad (${nivelLabel}, ${edadLabel} años) — adapta la IDEA al tema, no copies el ejemplo literal:\n${tecnicasNivel.map((t) => `- ${t}`).join("\n")}`
     : "";
 
-  return `Genera material educativo sobre el tema: ${tema}.
+  // Contexto opcional que aporta quien genera el tema: una nota escrita
+  // ("solo van a ver la Segunda Guerra hasta 1942", "enfócate en la parte
+  // de fracciones equivalentes") y/o la foto del resumen o apuntes que les
+  // dieron en clase. Ambos ORIENTAN el material sin limitarlo: el generador
+  // puede ampliar más allá de lo que traiga la foto, para que el material
+  // siga siendo completo aunque el apunte esté incompleto o mal escrito.
+  const bloqueContexto =
+    detalles || tieneImagenes
+      ? `
+
+CONTEXTO ADICIONAL DE QUIEN PIDE EL MATERIAL
+${detalles ? `- Indicaciones escritas: ${detalles}` : ""}${
+          tieneImagenes
+            ? `\n- Se adjunta(n) imagen(es) de un resumen, apuntes o material de clase. Léelas y úsalas como ORIENTACIÓN: respeta el enfoque, los términos y el alcance que traen, y prioriza esos puntos en el material. No te limites únicamente a lo que aparece ahí — puedes completar, corregir y ampliar lo necesario para que el material quede completo y correcto para el nivel indicado. Si la imagen no se alcanza a leer bien o no tiene que ver con el tema, ignórala y genera el material normalmente a partir del tema escrito.`
+            : ""
+        }
+Toma este contexto en cuenta en todas las secciones (resumen, actividad, trivia y material extra), sin mencionarlo explícitamente en el material — el estudiante no debe leer frases como "según el resumen que subiste".`
+      : "";
+
+  return `Genera material educativo sobre el tema: ${tema}.${bloqueContexto}
 
 PERFIL DEL ESTUDIANTE
 - Grupo escolar: ${nivelLabel}
@@ -194,6 +213,18 @@ Crea un repaso breve utilizando recuperación activa, adaptado al nivel:
 - Preparatoria: análisis, interpretación, aplicación, comparación de conceptos, resolución de casos.
 - Universidad/autodidacta: preguntas tipo examen, casos prácticos, análisis crítico, transferencia del conocimiento, preguntas abiertas, referencias o fuentes confiables cuando sean útiles.
 
+### Cómo redactar las preguntas de la trivia (muy importante)
+El objetivo es que se entiendan de una sola leída, sin que nadie tenga que releer la pregunta para saber qué le están preguntando. Sigue estas reglas al escribir cada una:
+- **Cortas y directas.** Máximo una o dos líneas. "¿Por qué empezó la guerra en 1939?" en vez de "¿Cuál de las siguientes opciones describe mejor las causas que detonaron el conflicto bélico de 1939?".
+- **Nunca empieces con "¿Cuál de las siguientes opciones…?"**, "¿Cuál de los siguientes enunciados…?" ni fórmulas de examen parecidas. Pregunta la cosa directamente.
+- **Una sola idea por pregunta.** Si necesitas preguntar dos cosas, haz dos preguntas.
+- **Lenguaje de todos los días**, el que usaría alguien de esa edad al hablar. Usa el término técnico solo si es justo lo que se está evaluando; si aparece, que la pregunta deje claro por contexto de qué se trata.
+- **Sin dobles negaciones** ni "todas las anteriores" / "ninguna de las anteriores".
+- **Opciones cortas y parejas**: pocas palabras cada una, de largo parecido entre sí (que la correcta no se note por ser la más larga o la más detallada), y todas creíbles — nada de opciones absurdas de relleno.
+- **Habla de tú**, en tono cercano y sin regañar. Puedes usar situaciones cotidianas o nombres de personas para aterrizar la pregunta, sobre todo en preescolar y primaria.
+- En preescolar y primaria baja, frases muy cortas y concretas; nada de subordinadas ni de "según el texto".
+- En preparatoria y universidad la pregunta puede exigir análisis, pero **la redacción sigue siendo simple**: la dificultad está en pensar la respuesta, no en descifrar el enunciado.
+
 ## 4. MATERIAL EXTRA
 Elige 1 o 2 recursos adecuados para la edad: flashcards, memorama, crucigrama, mini-glosario, relacionar columnas, completar conceptos, línea del tiempo, o tarjetas de preguntas. No incluyas recursos innecesarios.
 Si eliges memorama, relacionar columnas o flashcards, genera directamente el contenido real de las tarjetas (los pares término/definición o pregunta/respuesta completos y listos para recortar), no solo la instrucción de "hagan tarjetas".
@@ -260,13 +291,54 @@ Mantén un tono educativo, claro, positivo y adecuado para la edad.`;
  * @param {string[]} perfilDominante - ej. ["espacial","linguistica"], viene de calcularResultado() (ignorado si modo="grupo")
  * @param {"individual"|"grupo"} modo - "grupo" genera la tabla completa de 8 inteligencias (ver liga de grupo)
  */
-async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individual") {
-  const prompt = buildPrompt(tema, nivel, perfilDominante, modo);
+// El material completo (resumen + actividad(es) + trivia + material extra +
+// respuestas, y en modo grupo hasta 8 actividades) puede superar fácil los
+// 4000 tokens de salida — con ese límite Claude a veces se quedaba a media
+// cadena y el JSON llegaba truncado ("Unterminated string"). Subimos el
+// límite y, si aun así llega mal formado (corte raro, red inestable, etc.),
+// reintentamos la generación una vez antes de rendirnos.
+const TIPOS_IMAGEN_VALIDOS = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+const MAX_IMAGENES = 3; // un resumen normalmente cabe en 1-3 fotos
+
+/**
+ * Convierte lo que manda el frontend en bloques de imagen que entiende la
+ * API de Claude. Acepta tanto un data URL completo
+ * ("data:image/jpeg;base64,...") como { media_type, data }. Descarta en
+ * silencio cualquier cosa que no sea una imagen válida — una foto mal
+ * subida nunca debe tumbar la generación, solo se ignora.
+ */
+function normalizarImagenes(imagenes) {
+  if (!Array.isArray(imagenes)) return [];
+
+  return imagenes
+    .map((img) => {
+      if (typeof img === "string") {
+        const match = img.match(/^data:([^;]+);base64,(.+)$/);
+        if (!match) return null;
+        return { media_type: match[1], data: match[2] };
+      }
+      if (img && typeof img === "object" && img.data) {
+        return { media_type: img.media_type, data: String(img.data).replace(/^data:[^;]+;base64,/, "") };
+      }
+      return null;
+    })
+    .filter((img) => img && TIPOS_IMAGEN_VALIDOS.includes(img.media_type) && img.data.length > 100)
+    .slice(0, MAX_IMAGENES)
+    .map((img) => ({
+      type: "image",
+      source: { type: "base64", media_type: img.media_type, data: img.data },
+    }));
+}
+
+async function intentarGenerar(prompt, bloquesImagen = []) {
+  // Las imágenes van ANTES del texto: la API de Claude recomienda ese orden
+  // cuando el texto se refiere a las imágenes.
+  const content = bloquesImagen.length ? [...bloquesImagen, { type: "text", text: prompt }] : prompt;
 
   const response = await anthropic.messages.create({
     model: "claude-sonnet-5",
-    max_tokens: 4000,
-    messages: [{ role: "user", content: prompt }],
+    max_tokens: 8000,
+    messages: [{ role: "user", content }],
   });
 
   const rawText = response.content.find((b) => b.type === "text")?.text || "{}";
@@ -279,10 +351,24 @@ async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individ
     .replace(/\s*```$/i, "")
     .trim();
 
+  return JSON.parse(cleanedText);
+}
+
+async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individual", opciones = {}) {
+  const detalles = String(opciones.detalles || "").trim().slice(0, 1500);
+  const bloquesImagen = normalizarImagenes(opciones.imagenes);
+  const prompt = buildPrompt(tema, nivel, perfilDominante, modo, detalles, bloquesImagen.length > 0);
+
   try {
-    return JSON.parse(cleanedText);
+    return await intentarGenerar(prompt, bloquesImagen);
   } catch (err) {
-    throw new Error(`No se pudo parsear la respuesta del generador como JSON: ${err.message}`);
+    try {
+      return await intentarGenerar(prompt, bloquesImagen);
+    } catch (err2) {
+      throw new Error(
+        `No se pudo generar el material — la respuesta llegó incompleta. Intenta de nuevo. (${err2.message})`
+      );
+    }
   }
 }
 
