@@ -27,6 +27,57 @@ router.get("/quiz", (req, res) => {
   res.json({ version, preguntas: preguntasPublicas(version) });
 });
 
+const TIPOS_USUARIO = ["papa", "estudiante", "educador", "adulto", "otro"];
+
+/**
+ * GET /api/aprendizaje/mi-tipo
+ * Regresa el tipo de usuario elegido al registrarse, o null si todavía no
+ * lo contesta — el frontend usa ese null para saber que debe mostrar la
+ * pantalla de bienvenida.
+ */
+router.get("/mi-tipo", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { data, error } = await supabase
+      .from("usuarios_ajustes")
+      .select("tipo_usuario")
+      .eq("user_id", req.user.id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    res.json({ tipo_usuario: data?.tipo_usuario || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PUT /api/aprendizaje/mi-tipo
+ * body: { tipo_usuario: "papa"|"estudiante"|"educador"|"adulto"|"otro" }
+ * Se puede volver a llamar para cambiarlo (por si alguien se equivocó al
+ * registrarse, o si un papá también da clases).
+ */
+router.put("/mi-tipo", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { tipo_usuario } = req.body;
+    if (!TIPOS_USUARIO.includes(tipo_usuario)) {
+      return res.status(400).json({ error: `tipo_usuario debe ser uno de: ${TIPOS_USUARIO.join(", ")}.` });
+    }
+
+    const { error } = await supabase
+      .from("usuarios_ajustes")
+      .upsert(
+        { user_id: req.user.id, tipo_usuario, actualizado_en: new Date().toISOString() },
+        { onConflict: "user_id" }
+      );
+    if (error) throw new Error(error.message);
+
+    res.json({ status: "guardado", tipo_usuario });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /**
  * POST /api/aprendizaje/calcular
  * body: { respuestas: [...] }
