@@ -187,7 +187,28 @@ El resumen **NO es un bloque de texto corrido**. Es un objeto con partes separad
 
 Usa vocabulario apropiado para la edad e incluye ejemplos concretos dentro de las secciones.
 
-### Esquema visual
+### Diagrama (campo \`diagrama\`) — se dibuja de verdad, no es texto
+Además del resumen, elige **un** diagrama que ayude a VER la estructura del tema. No lo dibujes con guiones ni con arte ASCII: solo entrega los datos, y la plataforma lo dibuja como gráfico real.
+
+Elige el tipo según lo que el tema realmente es:
+
+| Tipo | Cuándo usarlo | Qué poner en \`datos\` |
+|---|---|---|
+| \`mapa_mental\` | El tema tiene un concepto central que se abre en ramas | \`{ "centro": "...", "ramas": [ { "titulo": "...", "hijos": ["...", "..."] } ] }\` — de 3 a 5 ramas, con 0 a 3 hijos cada una |
+| \`linea_tiempo\` | Hay una secuencia de hechos con fechas o etapas | \`{ "hitos": [ { "fecha": "1939", "titulo": "...", "detalle": "..." } ] }\` — de 4 a 7 hitos |
+| \`comparativo\` | Se comparan 2 o 3 cosas que se confunden entre sí | \`{ "columnas": ["Narrativo", "Dramático"], "filas": [ { "criterio": "¿Quién cuenta?", "valores": ["Un narrador", "Los personajes"] } ] }\` — de 3 a 5 filas |
+| \`proceso\` | Hay pasos que van en un orden fijo | \`{ "pasos": [ { "titulo": "Despejar", "detalle": "..." } ] }\` — de 3 a 6 pasos |
+| \`ciclo\` | Las etapas se repiten en círculo (agua, vida, estaciones) | \`{ "etapas": [ { "titulo": "Evaporación", "detalle": "..." } ] }\` — de 3 a 6 etapas |
+| \`jerarquia\` | Hay categorías que se subdividen (clasificaciones, taxonomías) | \`{ "raiz": "...", "niveles": [ { "titulo": "...", "hijos": ["...", "..."] } ] }\` |
+| \`partes\` | Algo se descompone en partes que conviene etiquetar | \`{ "todo": "La célula", "partes": [ { "nombre": "Núcleo", "funcion": "..." } ] }\` — de 3 a 6 partes |
+
+Reglas del diagrama:
+- **Textos MUY cortos.** Cada etiqueta de 1 a 4 palabras; los campos \`detalle\` máximo una línea. Un diagrama con frases largas deja de ser diagrama.
+- Elige el tipo que **de verdad corresponde** al tema. Si el tema es un procedimiento, \`proceso\`; si es una comparación, \`comparativo\`. No fuerces un mapa mental para todo.
+- \`titulo\`: una frase corta que diga qué muestra el diagrama.
+- Si de plano ningún tipo le queda al tema, pon \`"tipo": "ninguno"\` y deja \`datos\` como objeto vacío. Es preferible eso a un diagrama forzado que no aporta.
+
+### Esquema visual (texto, complementario al diagrama)
 Elige el formato más adecuado:
 - Preescolar → asociación imagen-palabra.
 - Primaria baja → esquema sencillo o mapa visual.
@@ -299,6 +320,7 @@ ${
     "truco": "..."
   },
   "esquema_visual": "...",
+  "diagrama": { "tipo": "mapa_mental|linea_tiempo|comparativo|proceso|ciclo|jerarquia|partes|ninguno", "titulo": "...", "datos": {} },
   "actividades": [ { "inteligencia": "linguistica|logico_matematica|espacial|musical|kinestesica|interpersonal|intrapersonal|naturalista", "titulo": "...", "instrucciones": "..." } ],
   "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["...", "..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
@@ -323,6 +345,7 @@ ${
     "truco": "..."
   },
   "esquema_visual": "...",
+  "diagrama": { "tipo": "mapa_mental|linea_tiempo|comparativo|proceso|ciclo|jerarquia|partes|ninguno", "titulo": "...", "datos": {} },
   "actividad": { "titulo": "...", "instrucciones": "..." },
   "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["...", "..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
@@ -431,7 +454,19 @@ function normalizarContenido(c) {
       respuesta: String(e.respuesta || ""),
     }));
 
-  return { ...c, resumen, ejercicios, es_de_practica: c.es_de_practica === true };
+  // El diagrama solo se acepta si el tipo es conocido Y trae datos; si no,
+  // se descarta y el frontend simplemente no dibuja nada. Vale más no tener
+  // diagrama que dibujar uno vacío o de un tipo que no sabemos pintar.
+  const TIPOS_DIAGRAMA = ["mapa_mental", "linea_tiempo", "comparativo", "proceso", "ciclo", "jerarquia", "partes"];
+  let diagrama = null;
+  if (c.diagrama && typeof c.diagrama === "object" && TIPOS_DIAGRAMA.includes(c.diagrama.tipo)) {
+    const datos = c.diagrama.datos && typeof c.diagrama.datos === "object" ? c.diagrama.datos : {};
+    if (Object.keys(datos).length) {
+      diagrama = { tipo: c.diagrama.tipo, titulo: String(c.diagrama.titulo || ""), datos };
+    }
+  }
+
+  return { ...c, resumen, ejercicios, diagrama, es_de_practica: c.es_de_practica === true };
 }
 
 async function intentarGenerar(prompt, bloquesImagen = []) {
