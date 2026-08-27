@@ -62,9 +62,21 @@ async function resolverAccesoIndividual(userId) {
  * mismo `contenido` (mismo patrón de pasos separados que ya usa
  * courses.js: subir → generar → publicar).
  */
+/**
+ * Normaliza lo que mande el frontend como etiquetas: acepta un arreglo de
+ * strings, recorta espacios, quita vacíos y duplicados. Cualquier otra cosa
+ * (undefined, string suelto, etc.) regresa un arreglo vacío — las etiquetas
+ * son opcionales en todo momento.
+ */
+function normalizarEtiquetas(valor) {
+  if (!Array.isArray(valor)) return [];
+  const limpias = valor.map((e) => String(e || "").trim()).filter(Boolean);
+  return [...new Set(limpias)].slice(0, 10); // hasta 10 etiquetas por tema, suficiente para materia/parcial/etc.
+}
+
 router.post("/generar", requireBuyer, async (req, res) => {
   try {
-    const { tema, nivel, modo, perfilId } = req.body;
+    const { tema, nivel, modo, perfilId, etiquetas } = req.body;
     if (!tema) return res.status(400).json({ error: "Falta tema." });
     const nivelesValidos = ["preescolar", "primaria_baja", "primaria_alta", "secundaria", "preparatoria", "universidad"];
     if (!nivelesValidos.includes(nivel)) {
@@ -102,7 +114,7 @@ router.post("/generar", requireBuyer, async (req, res) => {
     if (modoFinal === "individual" && supabase) {
       const { data: guardado, error: guardarError } = await supabase
         .from("mis_temas")
-        .insert({ user_id: req.user.id, tema, nivel, perfil_usado: perfilDominante, contenido, origen })
+        .insert({ user_id: req.user.id, tema, nivel, perfil_usado: perfilDominante, contenido, origen, etiquetas: normalizarEtiquetas(etiquetas) })
         .select("id")
         .single();
       if (!guardarError) temaId = guardado.id;
@@ -152,15 +164,26 @@ router.get("/mi-plan", requireBuyer, async (req, res) => {
  * GET /api/temas/mios
  * Historial de temas generados en modo individual por el usuario
  * autenticado (papás/adolescentes/adultos generando para sí mismos).
+ *
+ * Query opcional `etiqueta`: si se manda, regresa solo los temas que
+ * tengan esa etiqueta exacta (ej. "Matemáticas", "Parcial 1") — pensado
+ * para que el frontend pueda filtrar el historial. El filtrado por texto
+ * libre (buscar por el nombre del tema) se hace del lado del frontend
+ * sobre esta misma lista, no hace falta ida y vuelta al servidor para eso.
  */
 router.get("/mios", requireBuyer, async (req, res) => {
   if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from("mis_temas")
-      .select("id, tema, nivel, pdf_url, created_at")
+      .select("id, tema, nivel, pdf_url, etiquetas, created_at")
       .eq("user_id", req.user.id)
       .order("created_at", { ascending: false });
+
+    const { etiqueta } = req.query;
+    if (etiqueta) query = query.contains("etiquetas", [etiqueta]);
+
+    const { data, error } = await query;
     if (error) throw new Error(error.message);
 
     res.json({ temas: data || [] });
@@ -186,6 +209,32 @@ router.get("/mios/:id", requireBuyer, async (req, res) => {
     if (error || !data) return res.status(404).json({ error: "Tema no encontrado." });
 
     res.json({ tema: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PATCH /api/temas/mios/:id
+ * body: { etiquetas: string[] }
+ * Actualiza las etiquetas de un tema ya guardado en el historial — para
+ * poder agregar/corregir etiquetas (ej. "Parcial 1") después de generado,
+ * sin tener que gastar un tema nuevo.
+ */
+router.patch("/mios/:id", requireBuyer, async (req, res) => {
+  if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
+  try {
+    const etiquetas = normalizarEtiquetas(req.body.etiquetas);
+    const { data, error } = await supabase
+      .from("mis_temas")
+      .update({ etiquetas })
+      .eq("id", req.params.id)
+      .eq("user_id", req.user.id)
+      .select("id, etiquetas")
+      .single();
+    if (error || !data) return res.status(404).json({ error: "Tema no encontrado." });
+
+    res.json({ status: "etiquetas_actualizadas", etiquetas: data.etiquetas });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
