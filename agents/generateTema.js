@@ -157,16 +157,35 @@ ${instruccionActividad}
 IMPORTANTE:
 Las inteligencias representan diferentes formas de acercarse y practicar el contenido, no "estilos fijos" de aprendizaje.
 
+## 0. ¿ES UN TEMA DE PRÁCTICA O DE COMPRENSIÓN?
+
+Antes que nada decide de qué tipo es el tema y ponlo en el campo \`es_de_practica\`:
+
+- **De práctica (\`true\`)**: se domina RESOLVIENDO, no leyendo. Matemáticas, física, química, estadística, programación, reglas de ortografía y gramática, conversión de unidades, análisis sintáctico, contabilidad. En estos temas, media hora resolviendo vale más que dos horas leyendo teoría.
+- **De comprensión (\`false\`)**: se domina entendiendo y relacionando ideas. Historia, biología, literatura, geografía, civismo, filosofía, psicología.
+
+Esta decisión cambia el balance del material:
+
+| | De práctica | De comprensión |
+|---|---|---|
+| Teoría | Mínima — solo lo indispensable para poder resolver | Desarrollada |
+| Ejercicios | **6 a 8**, de dificultad creciente | 2 a 3, de aplicación o análisis |
+
+**Regla dura para temas de práctica:** la teoría existe para habilitar la práctica, no al revés. No expliques de más antes de poner a la persona a resolver.
+
 ## 1. ESTUDIO — MATERIAL BASE
 
-### Resumen
-- Explica el tema con la profundidad adecuada para la edad.
-- Usa vocabulario apropiado para el grupo.
-- Divide la explicación en pequeñas secciones.
-- Incluye ejemplos concretos.
-- Destaca entre 3 y 7 ideas clave según la dificultad del tema.
-- Cuando el tema tenga dos conceptos que se confunden fácilmente entre sí (por ejemplo, dos términos parecidos o una regla con excepción), acláralo explícitamente con una nota breve tipo "Ojo aquí, no se confundan: ..." en vez de solo definir cada uno por separado.
-- Si existe un truco mnemotécnico simple y natural para recordar el tema (una asociación de sonido, imagen, palabra o gesto), inclúyelo como un tip breve dentro del resumen.
+### Resumen (¡OJO CON EL FORMATO!)
+El resumen **NO es un bloque de texto corrido**. Es un objeto con partes separadas, porque un párrafo largo hace que la gente pierda la atención y deje de leer. Cada parte va en su propio campo:
+
+- **\`que_es\`**: 2 a 4 líneas, nada más. La idea central del tema, en lenguaje llano, como se la explicarías a alguien en la puerta del salón. Sin rodeos ni introducciones.
+- **\`secciones\`**: de 2 a 4 bloques cortos, cada uno con su \`titulo\` (3-6 palabras, concreto: "Cuándo se usa", "El caso difícil", "De dónde viene") y su \`texto\` (máximo 4-5 líneas). Cada sección trata UNA cosa. Si una sección se te alarga, pártela en dos.
+- **\`pasos\`**: SOLO si el tema es un procedimiento (resolver algo, aplicar un método, seguir una regla). Un arreglo de strings, un paso por elemento, cada uno de una línea y empezando con un verbo. **Nunca metas los pasos numerados dentro de un párrafo** — van aquí, separados.
+- **\`ideas_clave\`**: de 3 a 7 frases sueltas, cada una de una sola línea. Lo que debe quedarse en la cabeza aunque se olvide todo lo demás.
+- **\`ojo_aqui\`**: solo si aplica. La confusión típica de este tema, en una o dos líneas, con el formato "X no es lo mismo que Y: ...". Si no hay una confusión real y frecuente, deja el campo vacío — no inventes una.
+- **\`truco\`**: solo si existe uno natural. Una mnemotecnia breve (asociación de sonido, palabra, imagen o gesto) para recordar lo esencial. Si no hay uno bueno, deja el campo vacío en vez de forzarlo.
+
+Usa vocabulario apropiado para la edad e incluye ejemplos concretos dentro de las secciones.
 
 ### Esquema visual
 Elige el formato más adecuado:
@@ -200,6 +219,23 @@ ${bloqueTecnicasNivel}
 - Escribe las instrucciones como PASOS numerados, muy concretos y accionables — algo que un adulto pueda leer una vez y ejecutar de inmediato con el estudiante, sin interpretar nada (ej. "1. Digan el verso en voz alta y den un paso por cada sílaba. 2. Cuenten los pasos al final..." en vez de "practiquen el conteo de sílabas").
 - Favorece actividades que el estudiante pueda VIVIR con el cuerpo o con roles activos (caminar, aplaudir, actuar una escena corta, moverse por estaciones, ser el/la "maestro/a" que revisa la respuesta de otra persona) en lugar de actividades puramente de lectura o de responder por escrito, especialmente en preescolar y primaria.
 - Cuando tenga sentido, incluye una variante de "roles invertidos" (el estudiante le explica o le toma el examen a un adulto) — enseñar algo en voz alta ayuda a fijar el aprendizaje.
+
+## 2B. EJERCICIOS RESUELTOS — LA PARTE MÁS IMPORTANTE EN TEMAS DE PRÁCTICA
+
+Genera ejercicios para resolver: **6 a 8 si \`es_de_practica\` es true, 2 a 3 si es false.**
+
+Cada ejercicio lleva:
+- **\`enunciado\`**: el problema concreto a resolver. En matemáticas, con números reales, no con "sea un número cualquiera". Que se pueda resolver con lápiz y papel.
+- **\`pista\`**: una línea que empuja en la dirección correcta sin resolver nada ("despeja x en la segunda ecuación, que es la más fácil"). Es lo que diría un maestro al pasar junto al banco.
+- **\`pasos\`**: el procedimiento completo, un paso por elemento del arreglo, mostrando las operaciones de verdad ("2(1 + y) + y = 11" y no "sustituimos y operamos"). Quien se equivocó tiene que poder ubicar EN QUÉ PASO se equivocó — ese es el propósito.
+- **\`respuesta\`**: el resultado final, corto y sin ambigüedad.
+
+Reglas:
+- **Dificultad creciente.** El primero debe poder resolverse con lo que acaba de leer; el último debe exigir combinar cosas. Nunca empieces por el difícil.
+- **Varía la forma.** No pongas seis veces el mismo ejercicio con distintos números. Cambia el tipo de caso: uno directo, uno con negativos, uno con fracciones, uno planteado como problema de la vida real, uno donde haya que darse cuenta de algo.
+- **Al menos uno debe ser un problema en palabras**, no solo operaciones sueltas, para que se vea para qué sirve el tema.
+- **Adapta la dificultad al nivel escolar** indicado, no al tema en abstracto.
+- En temas de comprensión, los "ejercicios" son de aplicación o análisis (interpretar un caso, comparar dos situaciones, explicar por qué pasó algo), y \`pasos\` es el razonamiento que lleva a la respuesta.
 
 ## 3. REPASO — ACTIVIDAD LIGERA
 
@@ -253,9 +289,18 @@ ${
   modo === "grupo"
     ? `{
   "tema": "...",
-  "resumen": "...",
+  "es_de_practica": true,
+  "resumen": {
+    "que_es": "...",
+    "secciones": [ { "titulo": "...", "texto": "..." } ],
+    "pasos": ["...", "..."],
+    "ideas_clave": ["...", "...", "..."],
+    "ojo_aqui": "...",
+    "truco": "..."
+  },
   "esquema_visual": "...",
   "actividades": [ { "inteligencia": "linguistica|logico_matematica|espacial|musical|kinestesica|interpersonal|intrapersonal|naturalista", "titulo": "...", "instrucciones": "..." } ],
+  "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["...", "..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
   "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "..." } ],
   "respuestas": {
@@ -268,9 +313,18 @@ ${
 "actividades" debe traer exactamente 8 elementos, uno por cada inteligencia.`
     : `{
   "tema": "...",
-  "resumen": "...",
+  "es_de_practica": true,
+  "resumen": {
+    "que_es": "...",
+    "secciones": [ { "titulo": "...", "texto": "..." } ],
+    "pasos": ["...", "..."],
+    "ideas_clave": ["...", "...", "..."],
+    "ojo_aqui": "...",
+    "truco": "..."
+  },
   "esquema_visual": "...",
   "actividad": { "titulo": "...", "instrucciones": "..." },
+  "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["...", "..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
   "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "..." } ],
   "respuestas": {
@@ -281,6 +335,12 @@ ${
   }
 }`
 }
+
+RECORDATORIOS DE FORMATO (los errores más comunes):
+- \`resumen\` es un OBJETO, nunca un string. Si escribes todo el resumen como un párrafo, el material se vuelve una pared de texto y la persona deja de leer — que es exactamente lo que estamos evitando.
+- \`pasos\`, \`ideas_clave\` y \`ejercicios[].pasos\` son ARREGLOS. Un elemento por paso o por idea. Nunca metas "1. … 2. … 3. …" dentro de un solo string.
+- \`ojo_aqui\` y \`truco\` pueden ir vacíos ("") si no aplican al tema. Es preferible dejarlos vacíos a inventar algo forzado.
+- Deja \`pasos\` vacío ([]) si el tema no es un procedimiento.
 
 Mantén un tono educativo, claro, positivo y adecuado para la edad.`;
 }
@@ -330,14 +390,62 @@ function normalizarImagenes(imagenes) {
     }));
 }
 
+/**
+ * Deja el contenido siempre en la misma forma, venga como venga del modelo.
+ * Dos motivos:
+ *  - El modelo a veces regresa `resumen` como string suelto a pesar de las
+ *    instrucciones; en ese caso lo metemos en `que_es` para no perderlo.
+ *  - Los temas guardados ANTES de este cambio tienen `resumen` como string.
+ *    Al normalizar aquí y en el frontend, el historial viejo se sigue viendo
+ *    bien sin migrar la base de datos.
+ */
+function normalizarContenido(c) {
+  if (!c || typeof c !== "object") return c;
+
+  const arreglo = (v) => (Array.isArray(v) ? v.filter((x) => x !== null && x !== undefined && x !== "") : []);
+
+  let resumen = c.resumen;
+  if (typeof resumen === "string") {
+    resumen = { que_es: resumen, secciones: [], pasos: [], ideas_clave: [], ojo_aqui: "", truco: "" };
+  } else if (resumen && typeof resumen === "object") {
+    resumen = {
+      que_es: String(resumen.que_es || ""),
+      secciones: arreglo(resumen.secciones)
+        .filter((s) => s && (s.titulo || s.texto))
+        .map((s) => ({ titulo: String(s.titulo || ""), texto: String(s.texto || "") })),
+      pasos: arreglo(resumen.pasos).map(String),
+      ideas_clave: arreglo(resumen.ideas_clave).map(String),
+      ojo_aqui: String(resumen.ojo_aqui || ""),
+      truco: String(resumen.truco || ""),
+    };
+  } else {
+    resumen = { que_es: "", secciones: [], pasos: [], ideas_clave: [], ojo_aqui: "", truco: "" };
+  }
+
+  const ejercicios = arreglo(c.ejercicios)
+    .filter((e) => e && e.enunciado)
+    .map((e) => ({
+      enunciado: String(e.enunciado),
+      pista: String(e.pista || ""),
+      pasos: arreglo(e.pasos).map(String),
+      respuesta: String(e.respuesta || ""),
+    }));
+
+  return { ...c, resumen, ejercicios, es_de_practica: c.es_de_practica === true };
+}
+
 async function intentarGenerar(prompt, bloquesImagen = []) {
   // Las imágenes van ANTES del texto: la API de Claude recomienda ese orden
   // cuando el texto se refiere a las imágenes.
   const content = bloquesImagen.length ? [...bloquesImagen, { type: "text", text: prompt }] : prompt;
 
+  // 12000: con la estructura nueva el material creció bastante (resumen por
+  // secciones + 6-8 ejercicios con su procedimiento completo, y en modo grupo
+  // además las 8 actividades). Con 8000 volvía a arriesgarse el corte a media
+  // cadena que ya nos pasó una vez.
   const response = await anthropic.messages.create({
     model: "claude-sonnet-5",
-    max_tokens: 8000,
+    max_tokens: 12000,
     messages: [{ role: "user", content }],
   });
 
@@ -351,7 +459,7 @@ async function intentarGenerar(prompt, bloquesImagen = []) {
     .replace(/\s*```$/i, "")
     .trim();
 
-  return JSON.parse(cleanedText);
+  return normalizarContenido(JSON.parse(cleanedText));
 }
 
 async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individual", opciones = {}) {
@@ -372,4 +480,4 @@ async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individ
   }
 }
 
-module.exports = { generarMaterialTema, ETIQUETAS_NIVEL, EDAD_APROX, ETIQUETAS_INTELIGENCIA };
+module.exports = { generarMaterialTema, normalizarContenido, ETIQUETAS_NIVEL, EDAD_APROX, ETIQUETAS_INTELIGENCIA };

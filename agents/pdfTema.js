@@ -28,6 +28,83 @@ const ETIQUETAS_INTELIGENCIA = {
 const LETRAS = ["A", "B", "C", "D", "E", "F"];
 
 /**
+ * La fuente por defecto de pdfkit (Helvetica) usa codificación WinAnsi, que
+ * NO incluye buena parte de los símbolos que aparecen en material de
+ * matemáticas y ciencias. Cuando llega uno de esos, el PDF imprime basura:
+ * "x − y = 1" salía como 'x " y = 1' porque el signo menos matemático
+ * (U+2212) no es el guion normal. Es el mismo problema que antes tuvimos con
+ * el círculo "○" de las opciones de trivia.
+ *
+ * En vez de parcharlo símbolo por símbolo cada vez que aparece uno nuevo, se
+ * limpia TODO el contenido de una sola pasada antes de dibujar nada.
+ */
+const REEMPLAZOS = [
+  [/[−‒–—―]/g, "-"],   // menos matemático y rayas largas
+  [/[→⇒⟶]/g, " -> "],            // flechas a la derecha
+  [/[←⇐⟵]/g, " <- "],            // flechas a la izquierda
+  [/[↔⇔]/g, " <-> "],
+  [/[✓✔]/g, "OK"],                    // palomitas
+  [/[✗✘✕]/g, "X"],
+  [/≠/g, " != "], [/≤/g, " <= "], [/≥/g, " >= "],
+  [/≈/g, " ~ "], [/×/g, " x "], [/÷/g, " / "],
+  [/√/g, "raiz "], [/∞/g, "infinito"], [/∑/g, "suma "], [/∫/g, "integral "],
+  [/π/g, "pi "], [/α/g, "alfa "], [/β/g, "beta "], [/θ/g, "theta "],
+  [/λ/g, "lambda "], [/μ/g, "mu "], [/Ω/g, "omega "], [/Δ/g, "delta "],
+  [/[‘’‛]/g, "'"], [/[“”„]/g, '"'],
+  [/…/g, "..."], [/·/g, "."], [/•/g, "-"],
+  [/[    ]/g, " "],         // espacios raros
+];
+
+// Lo que WinAnsi sí puede imprimir arriba del rango Latin-1.
+const EXTRAS_WINANSI = new Set("€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ".split(""));
+
+function limpiarTexto(valor) {
+  let t = String(valor);
+  for (const [re, sub] of REEMPLAZOS) t = t.replace(re, sub);
+  // Red de seguridad: cualquier símbolo que la fuente no pueda dibujar se
+  // cambia por un espacio, en vez de salir como un glyph roto.
+  t = t
+    .split("")
+    .map((ch) => (ch.codePointAt(0) < 256 || EXTRAS_WINANSI.has(ch) ? ch : " "))
+    .join("");
+
+  // Los reemplazos meten espacios de sobra ("x  !=  0"); se colapsan sin
+  // tocar los saltos de línea, que sí importan en listas y esquemas.
+  return t.replace(/[ \t]{2,}/g, " ").replace(/[ \t]+\n/g, "\n");
+}
+
+/** Aplica limpiarTexto a todos los strings del contenido, a cualquier profundidad. */
+function limpiarContenido(valor) {
+  if (typeof valor === "string") return limpiarTexto(valor);
+  if (Array.isArray(valor)) return valor.map(limpiarContenido);
+  if (valor && typeof valor === "object") {
+    const salida = {};
+    for (const [k, v] of Object.entries(valor)) salida[k] = limpiarContenido(v);
+    return salida;
+  }
+  return valor;
+}
+
+/**
+ * Igual que en el frontend: los temas generados antes del rediseño traen
+ * `resumen` como un string de texto corrido; los nuevos lo traen partido en
+ * secciones. Esto deja todo en la forma nueva para poder imprimirlo igual.
+ */
+function normalizarResumen(resumen) {
+  const vacio = { que_es: "", secciones: [], pasos: [], ideas_clave: [], ojo_aqui: "", truco: "" };
+  if (!resumen) return vacio;
+  if (typeof resumen === "string") return { ...vacio, que_es: resumen };
+  return {
+    que_es: resumen.que_es || "",
+    secciones: Array.isArray(resumen.secciones) ? resumen.secciones.filter((s) => s && (s.titulo || s.texto)) : [],
+    pasos: Array.isArray(resumen.pasos) ? resumen.pasos.filter(Boolean) : [],
+    ideas_clave: Array.isArray(resumen.ideas_clave) ? resumen.ideas_clave.filter(Boolean) : [],
+    ojo_aqui: resumen.ojo_aqui || "",
+    truco: resumen.truco || "",
+  };
+}
+
+/**
  * Imprimible de un tema generado por agents/generateTema.js — reemplaza a
  * generarPdfEjercicios (agents/pdf.js, pensado solo para la lista simple
  * de {enunciado, respuesta} del flujo de video) para el flujo nuevo del
@@ -52,7 +129,11 @@ const LETRAS = ["A", "B", "C", "D", "E", "F"];
  * @param {"individual"|"grupo"} modo
  * @returns {Promise<string>} ruta local del PDF generado (temporal)
  */
-function generarPdfTema(contenido, modo = "individual") {
+function generarPdfTema(contenidoOriginal, modo = "individual") {
+  // Se limpia una sola vez, al entrar: de aquí para abajo todo el texto ya
+  // es seguro de imprimir con la fuente del PDF (ver limpiarTexto arriba).
+  const contenido = limpiarContenido(contenidoOriginal);
+
   return new Promise((resolve, reject) => {
     const outputPath = path.join(os.tmpdir(), `tema-${Date.now()}.pdf`);
     const doc = new PDFDocument({ size: "letter", margin: 50 });
@@ -138,9 +219,41 @@ function generarPdfTema(contenido, modo = "individual") {
     doc.fillColor(TEXTO).fontSize(19).font("Helvetica-Bold").text(contenido.tema || "Tema", doc.page.margins.left, doc.y, { width: contentWidth() });
     salto(0.8);
 
-    if (contenido.resumen) {
-      tituloSeccion("Resumen");
-      tarjeta(contenido.resumen, { colorFondo: HIELO, colorBorde: LINEA });
+    // El resumen ahora viene partido en secciones (ver agents/generateTema.js).
+    // Se imprime cada parte por separado — igual que en pantalla — porque un
+    // bloque de texto corrido es justo lo que hacía que se perdiera la
+    // atención. Los temas viejos traen `resumen` como string: en ese caso
+    // `normalizarResumen` lo mete en `que_es` y sale como antes.
+    const res = normalizarResumen(contenido.resumen);
+
+    if (res.que_es) {
+      tituloSeccion("De qué se trata");
+      tarjeta(res.que_es, { colorFondo: HIELO, colorBorde: MENTA });
+    }
+
+    res.secciones.forEach((s) => {
+      if (s.titulo) tituloSeccion(s.titulo, AZUL_PROFUNDO);
+      if (s.texto) tarjeta(s.texto, { colorFondo: "#FFFFFF", colorBorde: LINEA });
+    });
+
+    if (res.pasos.length) {
+      tituloSeccion("Paso a paso", AZUL_PROFUNDO);
+      tarjeta(res.pasos.map((p, i) => `${i + 1}. ${p}`).join("\n"), { colorFondo: "#FFFFFF", colorBorde: LINEA });
+    }
+
+    if (res.ideas_clave.length) {
+      tituloSeccion("Lo que no se te puede olvidar");
+      tarjeta(res.ideas_clave.map((k) => `• ${k}`).join("\n"), { colorFondo: HIELO, colorBorde: LINEA });
+    }
+
+    if (res.ojo_aqui) {
+      tituloSeccion("Ojo aquí", "#8A6100");
+      tarjeta(res.ojo_aqui, { colorFondo: "#FFF7E6", colorBorde: "#FFDFA0" });
+    }
+
+    if (res.truco) {
+      tituloSeccion("Truco para recordarlo", "#4B3BA8");
+      tarjeta(res.truco, { colorFondo: "#F3F0FF", colorBorde: "#D9D2FF" });
     }
 
     if (contenido.esquema_visual) {
@@ -191,6 +304,76 @@ function generarPdfTema(contenido, modo = "individual") {
 
         doc.y = y + alto;
         salto(0.6);
+      });
+    }
+
+    // --- Ejercicios (con espacio en blanco para resolver a mano) ---
+    // Las soluciones NO van aquí: van en la hoja de respuestas del final,
+    // para que la hoja del alumno se pueda repartir sin las respuestas.
+    const ejercicios = contenido.ejercicios || [];
+    if (ejercicios.length) {
+      doc.addPage();
+      tituloSeccion("Ejercicios", AZUL_PROFUNDO);
+      doc
+        .fillColor("#5b7d99")
+        .fontSize(9.5)
+        .font("Helvetica")
+        .text("Resuelve cada uno en el espacio de abajo. Las soluciones vienen en la hoja de respuestas.", {
+          width: contentWidth(),
+        });
+      salto(0.7);
+
+      ejercicios.forEach((e, i) => {
+        const x = doc.page.margins.left;
+        const w = contentWidth();
+        doc.font("Helvetica-Bold").fontSize(11);
+        const altoEnunciado = doc.heightOfString(e.enunciado || "", { width: w - 46, lineGap: 2 });
+        const altoPista = e.pista
+          ? doc.font("Helvetica-Oblique").fontSize(9).heightOfString(`Pista: ${e.pista}`, { width: w - 46 }) + 6
+          : 0;
+        const espacioResolver = 68; // renglones en blanco para trabajar
+        const alto = altoEnunciado + altoPista + espacioResolver + 26;
+        asegurarEspacio(alto);
+        const y = doc.y;
+
+        doc.roundedRect(x, y, w, alto, 8).fillAndStroke("#FFFFFF", LINEA);
+
+        // Número en círculo
+        doc.circle(x + 20, y + 20, 10).fill(AZUL_PROFUNDO);
+        doc
+          .fillColor("#FFFFFF")
+          .fontSize(9)
+          .font("Helvetica-Bold")
+          .text(String(i + 1), x + 12, y + 16, { width: 16, align: "center" });
+
+        let cursorY = y + 12;
+        doc
+          .fillColor(TEXTO)
+          .fontSize(11)
+          .font("Helvetica-Bold")
+          .text(e.enunciado || "", x + 36, cursorY, { width: w - 46, lineGap: 2 });
+        cursorY += altoEnunciado + 4;
+
+        if (e.pista) {
+          doc
+            .fillColor("#8A6100")
+            .fontSize(9)
+            .font("Helvetica-Oblique")
+            .text(`Pista: ${e.pista}`, x + 36, cursorY, { width: w - 46 });
+          cursorY += altoPista;
+        }
+
+        // Renglones punteados para resolver
+        cursorY += 8;
+        doc.strokeColor("#E4EEF7").lineWidth(0.8);
+        for (let r = 0; r < 4; r++) {
+          const ly = cursorY + r * 15;
+          doc.moveTo(x + 36, ly).lineTo(x + w - 14, ly).dash(2, { space: 3 }).stroke();
+        }
+        doc.undash().lineWidth(1);
+
+        doc.y = y + alto;
+        salto(0.5);
       });
     }
 
@@ -299,6 +482,26 @@ function generarPdfTema(contenido, modo = "individual") {
         salto(0.2);
       });
       salto(0.6);
+    }
+
+    if (ejercicios.length) {
+      tituloSeccion("Soluciones de los ejercicios", AZUL_PROFUNDO);
+      ejercicios.forEach((e, i) => {
+        asegurarEspacio(60);
+        doc
+          .fillColor(TEXTO)
+          .fontSize(10.5)
+          .font("Helvetica-Bold")
+          .text(`${i + 1}. ${e.enunciado || ""}`, { width: contentWidth(), lineGap: 2 });
+        (e.pasos || []).forEach((p) => {
+          doc.fillColor("#4A6A85").fontSize(10).font("Helvetica").text(`    ${p}`, { width: contentWidth(), lineGap: 2 });
+        });
+        if (e.respuesta) {
+          doc.fillColor(BOSQUE).fontSize(10.5).font("Helvetica-Bold").text(`    Respuesta: ${e.respuesta}`);
+        }
+        salto(0.45);
+      });
+      salto(0.5);
     }
 
     if (r.solucion_actividad) {
