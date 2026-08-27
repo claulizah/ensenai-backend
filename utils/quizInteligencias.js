@@ -408,40 +408,164 @@ const ACTIVIDADES_SUGERIDAS = {
 };
 
 /**
- * @param {"ninos"|"adulto"} version
+ * Baraja una copia del arreglo (Fisher-Yates). No modifica el original.
  */
-function preguntasPublicas(version = "ninos") {
-  const preguntas = version === "adulto" ? PREGUNTAS_ADULTO : PREGUNTAS_NINOS;
-  return preguntas.map(({ id, pregunta, opciones }) => ({ id, pregunta, opciones }));
+function barajar(arreglo) {
+  const copia = arreglo.slice();
+  for (let i = copia.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copia[i], copia[j]] = [copia[j], copia[i]];
+  }
+  return copia;
 }
 
 /**
- * @param {number[]} respuestas - un índice (0-7) por cada pregunta, en orden (12 respuestas)
+ * @param {"ninos"|"adulto"} version
+ *
+ * Cada pregunta regresa sus 8 opciones como objetos `{ tipo, texto }` y
+ * **en orden barajado**, distinto en cada pregunta y en cada intento.
+ *
+ * Antes las opciones salían siempre en el mismo orden fijo (lingüística
+ * primero, naturalista al final). Eso introducía un sesgo de posición real:
+ * la gente tiende a elegir de las primeras opciones que lee, así que las
+ * inteligencias del inicio del arreglo salían dominantes más seguido sin
+ * que nadie las prefiriera de verdad. Barajar lo elimina.
+ *
+ * Como el orden ya no es predecible, el frontend regresa el `tipo` (string)
+ * de lo que eligió la persona, no el índice de la opción.
+ */
+function preguntasPublicas(version = "ninos") {
+  const preguntas = version === "adulto" ? PREGUNTAS_ADULTO : PREGUNTAS_NINOS;
+  return preguntas.map(({ id, pregunta, opciones }) => ({
+    id,
+    pregunta,
+    opciones: barajar(opciones.map((texto, i) => ({ tipo: TIPOS[i], texto }))),
+  }));
+}
+
+const PESO_PRIMARIA = 1;
+const PESO_SECUNDARIA = 0.5;
+
+/**
+ * Normaliza una respuesta a `{ primaria, secundaria }` con tipos (strings).
+ * Acepta tres formas, para no romper perfiles ya guardados:
+ *  - number  → índice 0-7 del formato viejo (orden fijo de TIPOS)
+ *  - string  → el tipo directamente (formato nuevo, sin segunda opción)
+ *  - object  → { primaria, secundaria } (formato nuevo con segunda opción);
+ *              también acepta índices numéricos dentro del objeto.
+ */
+function normalizarRespuesta(resp) {
+  const aTipo = (v) => {
+    if (typeof v === "number") return TIPOS[v] || null;
+    if (typeof v === "string" && TIPOS.includes(v)) return v;
+    return null;
+  };
+
+  if (resp && typeof resp === "object" && !Array.isArray(resp)) {
+    const primaria = aTipo(resp.primaria);
+    const secundaria = aTipo(resp.secundaria);
+    return { primaria, secundaria: secundaria === primaria ? null : secundaria };
+  }
+  return { primaria: aTipo(resp), secundaria: null };
+}
+
+/**
+ * Revisa si el patrón de respuestas da para un resultado creíble. No juzga
+ * a la persona — solo detecta los casos en que claramente no se contestó
+ * pensando (todo igual, o casi todo igual), donde darle un "perfil
+ * dominante" sería inventarle algo.
+ */
+function evaluarConfiabilidad(normalizadas) {
+  const primarias = normalizadas.map((r) => r.primaria).filter(Boolean);
+  const distintos = new Set(primarias).size;
+
+  if (primarias.length < 8) {
+    return { confiable: false, motivo: "pocas_respuestas" };
+  }
+  if (distintos === 1) {
+    return { confiable: false, motivo: "siempre_lo_mismo" };
+  }
+  if (distintos === 2 && primarias.length >= 10) {
+    return { confiable: false, motivo: "muy_poca_variedad" };
+  }
+  return { confiable: true, motivo: null };
+}
+
+/**
+ * @param {Array<number|string|{primaria:string, secundaria?:string}>} respuestas
+ *
+ * Calcula el perfil de inteligencias. Dos correcciones importantes frente
+ * a la versión anterior:
+ *
+ * 1. **Segunda opción con medio punto.** Antes cada pregunta aportaba un
+ *    solo dato; con 12 preguntas repartidas entre 8 categorías los empates
+ *    eran constantes (en simulación, el 56% de los tests empataba justo en
+ *    el corte del top 2). Permitir una segunda opción casi duplica la señal
+ *    sin alargar el test.
+ *
+ * 2. **Desempate justo.** Antes se ordenaba con un sort estable sobre el
+ *    arreglo TIPOS, así que ante un empate SIEMPRE ganaba el tipo que
+ *    apareciera primero en ese arreglo — lingüística salía dominante 2.2
+ *    veces más seguido que naturalista con respuestas puramente al azar.
+ *    Ahora los empates se rompen por señal real: primero quien tenga más
+ *    elecciones como primera opción, y si sigue empatado, quien haya sido
+ *    elegido antes en el test (una preferencia temprana y espontánea pesa
+ *    más que una tardía). Nunca por el orden del arreglo.
  */
 function calcularResultado(respuestas) {
-  const conteo = {};
-  TIPOS.forEach((t) => (conteo[t] = 0));
+  const normalizadas = (respuestas || []).map(normalizarRespuesta);
 
-  respuestas.forEach((indice) => {
-    const tipo = TIPOS[indice];
-    if (tipo) conteo[tipo]++;
+  const peso = {};
+  const vecesPrimaria = {};
+  const primeraAparicion = {};
+  TIPOS.forEach((t) => {
+    peso[t] = 0;
+    vecesPrimaria[t] = 0;
+    primeraAparicion[t] = Infinity;
   });
 
-  const total = respuestas.length || 1;
+  normalizadas.forEach(({ primaria, secundaria }, i) => {
+    if (primaria) {
+      peso[primaria] += PESO_PRIMARIA;
+      vecesPrimaria[primaria]++;
+      primeraAparicion[primaria] = Math.min(primeraAparicion[primaria], i);
+    }
+    if (secundaria) {
+      peso[secundaria] += PESO_SECUNDARIA;
+      primeraAparicion[secundaria] = Math.min(primeraAparicion[secundaria], i);
+    }
+  });
+
+  const pesoTotal = TIPOS.reduce((s, t) => s + peso[t], 0) || 1;
   const porcentajes = {};
-  TIPOS.forEach((t) => (porcentajes[t] = Math.round((conteo[t] / total) * 100)));
+  TIPOS.forEach((t) => (porcentajes[t] = Math.round((peso[t] / pesoTotal) * 100)));
 
-  const ordenado = TIPOS.slice().sort((a, b) => conteo[b] - conteo[a]);
-  const perfilDominante = ordenado.slice(0, 2).filter((t) => conteo[t] > 0);
+  const ordenado = TIPOS.slice().sort((a, b) => {
+    if (peso[b] !== peso[a]) return peso[b] - peso[a];
+    if (vecesPrimaria[b] !== vecesPrimaria[a]) return vecesPrimaria[b] - vecesPrimaria[a];
+    if (primeraAparicion[a] !== primeraAparicion[b]) return primeraAparicion[a] - primeraAparicion[b];
+    return 0;
+  });
 
+  const conPeso = ordenado.filter((t) => peso[t] > 0);
+  const perfilDominante = conPeso.slice(0, 2);
+  // Las que siguen, para mostrarlas como "también le funciona" sin darles
+  // el peso visual de las principales.
+  const secundarias = conPeso.slice(2, 4);
+
+  const confiabilidad = evaluarConfiabilidad(normalizadas);
   const repasoSugerido = [...new Set(perfilDominante.flatMap((t) => REPASO_SUGERIDO[t] || []))];
   const actividadesSugeridas = perfilDominante.map((t) => ({ tipo: t, actividad: ACTIVIDADES_SUGERIDAS[t] }));
 
   return {
-    conteo,
+    conteo: peso, // ahora es peso (la primaria vale 1, la secundaria 0.5)
     porcentajes,
     perfil_dominante: perfilDominante,
     perfil_dominante_texto: perfilDominante.map((t) => ETIQUETAS[t]),
+    secundarias,
+    secundarias_texto: secundarias.map((t) => ETIQUETAS[t]),
+    confiable: confiabilidad.confiable,
+    motivo_no_confiable: confiabilidad.motivo,
     repaso_sugerido: repasoSugerido,
     actividades_sugeridas: actividadesSugeridas,
     // alias por compatibilidad con el nombre anterior del campo
