@@ -41,7 +41,9 @@ function validarEstructura(material, tipo) {
 
   if (tipo === 'memorama') {
     const tarjetas = material.tarjetas || [];
-    if (tarjetas.length % 2 !== 0) {
+    if (tarjetas.length === 0) {
+      problemas.push('El memorama no tiene ninguna tarjeta.');
+    } else if (tarjetas.length % 2 !== 0) {
       problemas.push(`El memorama tiene ${tarjetas.length} tarjetas — debe ser un número par para que todas tengan pareja.`);
     }
     const grupos = {};
@@ -118,17 +120,32 @@ function compararConEdad(scoreLectura, edadObjetivo) {
 //    actuando como REVISOR, no como generador)
 // ============================================================
 
+const TIMEOUT_REVISION_MS = 15000;
+
+function conTimeout(promesa, ms, mensajeError) {
+  return Promise.race([
+    promesa,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(mensajeError)), ms)),
+  ]);
+}
+
 async function revisarConIA(askClaude, material, contexto) {
   const systemPrompt = `Eres un revisor de calidad educativa, estricto pero justo.
 Tu única tarea es encontrar problemas REALES en el siguiente material — no
 opines sobre estilo ni hagas sugerencias de mejora, solo detecta errores.
+
+Tema que se pidió: "${contexto.tema || 'no especificado'}"
+Edad objetivo: ${contexto.edadObjetivo} años
 
 Revisa específicamente:
 1. Datos incorrectos o inventados (fechas, nombres, hechos científicos, etc.)
 2. Preguntas de quiz donde ninguna opción sea realmente correcta, o donde
    más de una opción podría considerarse correcta (ambigüedad)
 3. Contradicciones dentro del mismo texto
-4. Contenido inapropiado para la edad objetivo (${contexto.edadObjetivo} años)
+4. Que el contenido sea realmente sobre el tema pedido — no un tema distinto o desviado
+5. Que los CONCEPTOS (no solo el vocabulario) sean apropiados para la edad —
+   por ejemplo, una palabra corta como "ADN" puede estar bien escrita pero
+   ser un concepto demasiado avanzado para un niño de 5 años
 
 Si NO encuentras ningún problema, responde exactamente: OK
 
@@ -136,7 +153,18 @@ Si encuentras problemas, responde con una lista, una línea por problema,
 cada línea empezando con "- ". No agregues explicaciones adicionales.`;
 
   const materialTexto = JSON.stringify(material, null, 2);
-  const respuesta = await askClaude(systemPrompt, materialTexto, 400);
+  let respuesta;
+  try {
+    respuesta = await conTimeout(
+      askClaude(systemPrompt, materialTexto, 400),
+      TIMEOUT_REVISION_MS,
+      'La revisión con IA tardó demasiado (timeout) — se trata como "no verificado" en vez de bloquear al usuario.'
+    );
+  } catch (err) {
+    // Si el revisor falla o tarda, no bloqueamos al usuario — se entrega el
+    // material sin el sello de verificado, y se registra la causa.
+    return { ok: false, problemas: [`Revisión con IA no completada: ${err.message}`] };
+  }
 
   const limpio = respuesta.trim();
   if (limpio.toUpperCase() === 'OK') {
@@ -164,8 +192,29 @@ cada línea empezando con "- ". No agregues explicaciones adicionales.`;
  * @param {string} temaOriginal - el tema/prompt original del usuario
  * @param {object} contexto - { tipo: 'quiz'|'memorama'|'resumen', edadObjetivo: number }
  * @param {number} maxIntentos - default 2 (1 intento inicial + 1 regeneración)
+ * @param {object} [opciones] - opcional:
+ *   - cache: { get(clave), set(clave, valor) } — para no regenerar/revisar
+ *     dos veces el mismo tema+edad+tipo. Si no se pasa, no se cachea nada.
+ *   - onProblemaDetectado(problemas, intento) — callback para que registres
+ *     (log, base de datos, etc.) qué tipo de errores salen más seguido y
+ *     así ajustar tus prompts de generación con el tiempo.
  */
-async function verificarYCorregir(askClaude, generarFn, temaOriginal, contexto, maxIntentos = 2) {
+async function verificarYCorregir(askClaude, generarFn, temaOriginal, contexto, maxIntentos = 2, opciones = {}) {
+  const { cache, onProblemaDetectado } = opciones;
+
+  const claveCache = cache
+    ? `${contexto.tipo}:${contexto.edadObjetivo}:${temaOriginal.trim().toLowerCase()}`
+    : null;
+
+  if (cache) {
+    const enCache = await cache.get(claveCache);
+    if (enCache) return enCache;
+  }
+
+  // Le pasamos el tema al contexto para que el revisor de IA pueda checar
+  // que el contenido de verdad sea sobre lo que se pidió.
+  const contextoConTema = { ...contexto, tema: temaOriginal };
+
   let material = null;
   let intentos = 0;
   let notas = [];
@@ -193,25 +242,32 @@ async function verificarYCorregir(askClaude, generarFn, temaOriginal, contexto, 
 
     // Si ya hay problemas estructurales/de nivel, no gastamos la llamada de IA todavía —
     // vamos directo a regenerar (ahorra costo).
-    if (notas.length > 0) continue;
+    if (notas.length > 0) {
+      if (onProblemaDetectado) onProblemaDetectado(notas, intentos);
+      continue;
+    }
 
     // Paso 3: revisión con IA — solo si lo anterior pasó limpio
-    const revisionIA = await revisarConIA(askClaude, material, contexto);
+    const revisionIA = await revisarConIA(askClaude, material, contextoConTema);
     if (!revisionIA.ok) {
       notas.push(...revisionIA.problemas);
+      if (onProblemaDetectado) onProblemaDetectado(notas, intentos);
       continue;
     }
 
     // Todo pasó: material verificado
-    return {
+    const resultadoOk = {
       material,
       calidad: { verificado: true, intentos, notas: [] },
     };
+    if (cache) await cache.set(claveCache, resultadoOk);
+    return resultadoOk;
   }
 
   // Se acabaron los intentos y siguen quedando problemas —
   // se entrega igual (no bloquear al usuario), pero SIN el sello de verificado,
   // y con las notas para que tú puedas revisar manualmente el caso.
+  // Nota: esto NO se cachea — no queremos guardar/repetir un resultado sin verificar.
   return {
     material,
     calidad: { verificado: false, intentos, notas },
