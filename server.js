@@ -9,6 +9,7 @@ const aprendizajeRouter = require("./routes/aprendizaje");
 const gruposRouter = require("./routes/grupos");
 const temasRouter = require("./routes/temas");
 const { stripeWebhookHandler } = require("./routes/stripeWebhook");
+const { inboundEmailWebhookHandler } = require("./routes/inboundEmail");
 
 const app = express();
 
@@ -33,6 +34,11 @@ app.use(
 );
 
 app.post("/api/purchases/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
+
+// Webhook de "Receiving" de Resend (contacto@ensenai.com → correo personal
+// — ver routes/inboundEmail.js). Igual que el de Stripe, necesita el body
+// RAW para verificar la firma, así que se registra antes de express.json().
+app.post("/api/inbound/webhook", express.raw({ type: "application/json" }), inboundEmailWebhookHandler);
 
 // 12 MB: las fotos de resúmenes/apuntes que se mandan al generador de temas
 // viajan como base64 dentro del JSON (ver routes/temas.js). El frontend ya
