@@ -3,6 +3,7 @@ const Stripe = require("stripe");
 const { slugify } = require("../utils/slugify");
 const { requireBuyer } = require("../middleware/auth");
 const { obtenerPlanGrupo, inicioDeMes } = require("../utils/planes");
+const { primerNombre } = require("../utils/nombre");
 const supabase = require("../db/supabase");
 
 const router = express.Router();
@@ -10,6 +11,55 @@ const router = express.Router();
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) throw new Error("Falta STRIPE_SECRET_KEY en tu .env.");
   return new Stripe(process.env.STRIPE_SECRET_KEY);
+}
+
+// Misma normalización que usa g.html en el navegador (normalizarTexto) —
+// tiene que coincidir para que una respuesta correcta no se marque como
+// incorrecta solo por mayúsculas o espacios de más.
+function normalizarTexto(s) {
+  return (s || "").toString().trim().toLowerCase();
+}
+
+/**
+ * Recalcula "acerto" pregunta por pregunta usando el contenido REAL del
+ * tema guardado en la base de datos (contenido.trivia), no lo que haya
+ * mandado el cliente — así una respuesta manipulada desde las herramientas
+ * de desarrollador no puede aparecer como "correcta" en el reporte del
+ * profesor. Server siempre gana: pregunta, respuesta_correcta y acerto que
+ * salen de aquí sustituyen lo que mandó el cliente; solo "respuesta" (lo
+ * que la persona realmente contestó) es del cliente, porque eso no hay
+ * forma de conocerlo del lado del servidor.
+ */
+function verificarRespuestas(contenido, respuestasCliente) {
+  const triviaOriginal = Array.isArray(contenido?.trivia) ? contenido.trivia : [];
+
+  return respuestasCliente.map((r) => {
+    const original = Number.isInteger(r.indice) ? triviaOriginal[r.indice] : undefined;
+
+    // No pudimos ubicar la pregunta original (tema editado, índice raro,
+    // etc.) — guardamos lo que llegó pero sin confiar en su calificación.
+    if (!original) {
+      return {
+        pregunta: typeof r.pregunta === "string" ? r.pregunta : "",
+        respuesta: typeof r.respuesta === "string" ? r.respuesta : null,
+        respuesta_correcta: typeof r.respuesta_correcta === "string" ? r.respuesta_correcta : "",
+        acerto: null,
+      };
+    }
+
+    const esCerrada = Array.isArray(original.opciones) && original.opciones.length > 0;
+    const respuesta = typeof r.respuesta === "string" ? r.respuesta : null;
+    const acerto = esCerrada
+      ? !!respuesta && normalizarTexto(respuesta) === normalizarTexto(original.respuesta_correcta)
+      : null; // abierta: nunca se autocalifica, ni aquí ni en g.html
+
+    return {
+      pregunta: original.pregunta || "",
+      respuesta,
+      respuesta_correcta: original.respuesta_correcta || "",
+      acerto,
+    };
+  });
 }
 
 function requireSupabase(res) {
@@ -363,6 +413,114 @@ router.post("/publico/:slug/acceso", async (req, res) => {
     if (error) throw new Error(error.message);
 
     res.json({ status: "acceso_registrado" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/grupos/publico/:slug/temas/:temaId/respuestas
+ * body: { nombre?, respuestas: [{ indice, pregunta, respuesta, respuesta_correcta, acerto }] }
+ * Público — guarda el detalle de cómo un alumno/paciente contestó la trivia
+ * de un tema, para que el profesional pueda ver no solo el acceso sino qué
+ * está fallando el grupo. Se llama al terminar "Revisar mis respuestas" en
+ * g.html; si falla (sin internet, etc.) no bloquea al alumno — ya vio su
+ * calificación en pantalla de todos modos, esto es solo para el profesor.
+ *
+ * "acerto" NUNCA se toma tal cual del cliente: verificarRespuestas() lo
+ * recalcula leyendo la pregunta real desde grupo_temas.contenido (por
+ * "indice"), para que alguien no pueda mandar respuestas falsas marcadas
+ * como correctas desde las herramientas de desarrollador del navegador.
+ *
+ * Privacidad: nombre nunca guarda más que el primer nombre o apodo (ver
+ * utils/nombre.js), sin importar el modo del grupo. En grupos con
+ * mostrar_nombres = false (pensado para psicólogos con pacientes) dar el
+ * nombre es opcional en g.html — si la persona lo dio, aquí se guarda
+ * igual que en cualquier otro grupo (recortado al primer nombre); si lo
+ * omitió, req.body.nombre llega vacío y queda null. A diferencia de esta
+ * ruta, el registro de accesos (POST /publico/:slug/acceso) sí sigue
+ * forzando null en grupos anónimos — ese conteo no necesita identificar a
+ * nadie.
+ */
+router.post("/publico/:slug/temas/:temaId/respuestas", async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { data: grupo, error: grupoError } = await supabase
+      .from("grupos")
+      .select("id, mostrar_nombres")
+      .eq("slug", req.params.slug)
+      .single();
+    if (grupoError || !grupo) return res.status(404).json({ error: "Grupo no encontrado." });
+
+    const { data: tema, error: temaError } = await supabase
+      .from("grupo_temas")
+      .select("id, grupo_id, contenido")
+      .eq("id", req.params.temaId)
+      .single();
+    if (temaError || !tema || tema.grupo_id !== grupo.id) {
+      return res.status(404).json({ error: "Tema no encontrado en este grupo." });
+    }
+
+    const { nombre, respuestas } = req.body;
+    if (!Array.isArray(respuestas) || respuestas.length === 0) {
+      return res.status(400).json({ error: "Faltan respuestas." });
+    }
+
+    const respuestasVerificadas = verificarRespuestas(tema.contenido, respuestas);
+    const cerradas = respuestasVerificadas.filter((r) => r.acerto === true || r.acerto === false);
+    const aciertos = cerradas.filter((r) => r.acerto === true).length;
+
+    const { error } = await supabase.from("respuestas_alumno").insert({
+      grupo_tema_id: tema.id,
+      nombre: primerNombre(nombre),
+      respuestas: respuestasVerificadas,
+      aciertos,
+      total_cerradas: cerradas.length,
+    });
+    if (error) throw new Error(error.message);
+
+    res.json({ status: "respuestas_guardadas" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/grupos/:id/temas/:temaId/respuestas
+ * Para el profesional dueño del grupo — regresa cada envío de respuestas de
+ * trivia de ese tema, con el detalle pregunta por pregunta, para ver qué
+ * está fallando el grupo (no solo un promedio).
+ */
+router.get("/:id/temas/:temaId/respuestas", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { data: grupo, error: grupoError } = await supabase
+      .from("grupos")
+      .select("id, profesional_id")
+      .eq("id", req.params.id)
+      .single();
+    if (grupoError || !grupo) return res.status(404).json({ error: "Grupo no encontrado." });
+    if (grupo.profesional_id !== req.user.id) {
+      return res.status(403).json({ error: "Este grupo no te pertenece." });
+    }
+
+    const { data: tema, error: temaError } = await supabase
+      .from("grupo_temas")
+      .select("id, grupo_id")
+      .eq("id", req.params.temaId)
+      .single();
+    if (temaError || !tema || tema.grupo_id !== grupo.id) {
+      return res.status(404).json({ error: "Tema no encontrado en este grupo." });
+    }
+
+    const { data, error } = await supabase
+      .from("respuestas_alumno")
+      .select("id, nombre, respuestas, aciertos, total_cerradas, created_at")
+      .eq("grupo_tema_id", tema.id)
+      .order("created_at", { ascending: false });
+    if (error) throw new Error(error.message);
+
+    res.json({ respuestas: data || [] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
