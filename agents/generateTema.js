@@ -497,6 +497,23 @@ async function intentarGenerar(prompt, bloquesImagen = []) {
   return normalizarContenido(JSON.parse(cleanedText));
 }
 
+/**
+ * askClaude(systemPrompt, mensajeUsuario, maxTokens) — wrapper delgado sobre
+ * el mismo cliente `anthropic` de arriba, con la firma que espera
+ * utils/revisorCalidad.js para su paso de revisión con IA (revisarConIA).
+ * No hace limpieza de ```json``` ni parseo: ese módulo espera texto plano
+ * ("OK" o una lista "- problema"), no JSON.
+ */
+async function askClaude(systemPrompt, mensajeUsuario, maxTokens = 1000) {
+  const response = await anthropic.messages.create({
+    model: "claude-sonnet-5",
+    max_tokens: maxTokens,
+    system: systemPrompt,
+    messages: [{ role: "user", content: mensajeUsuario }],
+  });
+  return response.content.find((b) => b.type === "text")?.text || "";
+}
+
 async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individual", opciones = {}) {
   const detalles = String(opciones.detalles || "").trim().slice(0, 1500);
   const bloquesImagen = normalizarImagenes(opciones.imagenes);
@@ -515,4 +532,4 @@ async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individ
   }
 }
 
-module.exports = { generarMaterialTema, normalizarContenido, ETIQUETAS_NIVEL, EDAD_APROX, ETIQUETAS_INTELIGENCIA };
+module.exports = { generarMaterialTema, normalizarContenido, askClaude, ETIQUETAS_NIVEL, EDAD_APROX, ETIQUETAS_INTELIGENCIA };
