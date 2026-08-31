@@ -162,7 +162,7 @@ router.post("/checkout-suscripcion", requireBuyer, async (req, res) => {
       limiteLabel = `temas-grupo ilimitados, hasta ${settings.plan_grupo_ilimitado_limite_grupos} grupos`;
     }
 
-    const nivelLabel = nivel === "aprendemos" ? "Aprendemos" : "Ilimitado";
+    const nivelLabel = nivel === "aprendemos" ? "Esencial" : "Ilimitado";
     const label = `Plan ${nivelLabel} — ${tipo === "individual" ? "individual" : "grupo"} (${limiteLabel})`;
 
     const stripe = getStripe();

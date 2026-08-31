@@ -4,6 +4,7 @@ const { slugify } = require("../utils/slugify");
 const { requireBuyer } = require("../middleware/auth");
 const { obtenerPlanGrupo, inicioDeMes } = require("../utils/planes");
 const { primerNombre } = require("../utils/nombre");
+const { verificarRespuestas } = require("../utils/trivia");
 const supabase = require("../db/supabase");
 
 const router = express.Router();
@@ -11,55 +12,6 @@ const router = express.Router();
 function getStripe() {
   if (!process.env.STRIPE_SECRET_KEY) throw new Error("Falta STRIPE_SECRET_KEY en tu .env.");
   return new Stripe(process.env.STRIPE_SECRET_KEY);
-}
-
-// Misma normalización que usa g.html en el navegador (normalizarTexto) —
-// tiene que coincidir para que una respuesta correcta no se marque como
-// incorrecta solo por mayúsculas o espacios de más.
-function normalizarTexto(s) {
-  return (s || "").toString().trim().toLowerCase();
-}
-
-/**
- * Recalcula "acerto" pregunta por pregunta usando el contenido REAL del
- * tema guardado en la base de datos (contenido.trivia), no lo que haya
- * mandado el cliente — así una respuesta manipulada desde las herramientas
- * de desarrollador no puede aparecer como "correcta" en el reporte del
- * profesor. Server siempre gana: pregunta, respuesta_correcta y acerto que
- * salen de aquí sustituyen lo que mandó el cliente; solo "respuesta" (lo
- * que la persona realmente contestó) es del cliente, porque eso no hay
- * forma de conocerlo del lado del servidor.
- */
-function verificarRespuestas(contenido, respuestasCliente) {
-  const triviaOriginal = Array.isArray(contenido?.trivia) ? contenido.trivia : [];
-
-  return respuestasCliente.map((r) => {
-    const original = Number.isInteger(r.indice) ? triviaOriginal[r.indice] : undefined;
-
-    // No pudimos ubicar la pregunta original (tema editado, índice raro,
-    // etc.) — guardamos lo que llegó pero sin confiar en su calificación.
-    if (!original) {
-      return {
-        pregunta: typeof r.pregunta === "string" ? r.pregunta : "",
-        respuesta: typeof r.respuesta === "string" ? r.respuesta : null,
-        respuesta_correcta: typeof r.respuesta_correcta === "string" ? r.respuesta_correcta : "",
-        acerto: null,
-      };
-    }
-
-    const esCerrada = Array.isArray(original.opciones) && original.opciones.length > 0;
-    const respuesta = typeof r.respuesta === "string" ? r.respuesta : null;
-    const acerto = esCerrada
-      ? !!respuesta && normalizarTexto(respuesta) === normalizarTexto(original.respuesta_correcta)
-      : null; // abierta: nunca se autocalifica, ni aquí ni en g.html
-
-    return {
-      pregunta: original.pregunta || "",
-      respuesta,
-      respuesta_correcta: original.respuesta_correcta || "",
-      acerto,
-    };
-  });
 }
 
 function requireSupabase(res) {
@@ -521,6 +473,103 @@ router.get("/:id/temas/:temaId/respuestas", requireBuyer, async (req, res) => {
     if (error) throw new Error(error.message);
 
     res.json({ respuestas: data || [] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/grupos/publico/:slug/temas/:temaId/ejercicios-marcados
+ * body: { nombre?, indices: number[] }
+ * Público — "checkbox ligero" de progreso: el alumno/paciente marca en
+ * g.html qué ejercicios de la pestaña "Practicar" ya resolvió (sin foto,
+ * sin Storage) y le da "Guardar mi progreso". Pensado para validar si a
+ * los profesionales les basta con esta señal antes de construir algo más
+ * caro (ver ejercicios_marcados_alumno en db/schema_v31.sql).
+ *
+ * `indices` se limpia igual que en /respuestas: se descarta cualquier cosa
+ * fuera del rango real de ejercicios del tema, para que no llegue basura
+ * desde las herramientas de desarrollador del navegador.
+ *
+ * Privacidad: mismo tratamiento de "nombre" que /respuestas (primer
+ * nombre/apodo, opcional en grupos anónimos) — ver utils/nombre.js.
+ */
+router.post("/publico/:slug/temas/:temaId/ejercicios-marcados", async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { data: grupo, error: grupoError } = await supabase
+      .from("grupos")
+      .select("id")
+      .eq("slug", req.params.slug)
+      .single();
+    if (grupoError || !grupo) return res.status(404).json({ error: "Grupo no encontrado." });
+
+    const { data: tema, error: temaError } = await supabase
+      .from("grupo_temas")
+      .select("id, grupo_id, contenido")
+      .eq("id", req.params.temaId)
+      .single();
+    if (temaError || !tema || tema.grupo_id !== grupo.id) {
+      return res.status(404).json({ error: "Tema no encontrado en este grupo." });
+    }
+
+    const { nombre, indices } = req.body;
+    const totalEjercicios = Array.isArray(tema.contenido?.ejercicios) ? tema.contenido.ejercicios.length : 0;
+    if (!totalEjercicios) return res.status(400).json({ error: "Este tema no tiene ejercicios." });
+
+    const indicesValidos = Array.isArray(indices)
+      ? [...new Set(indices.map(Number).filter((i) => Number.isInteger(i) && i >= 0 && i < totalEjercicios))]
+      : [];
+
+    const { error } = await supabase.from("ejercicios_marcados_alumno").insert({
+      grupo_tema_id: tema.id,
+      nombre: primerNombre(nombre),
+      indices_resueltos: indicesValidos,
+      total_ejercicios: totalEjercicios,
+    });
+    if (error) throw new Error(error.message);
+
+    res.json({ status: "progreso_guardado" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/grupos/:id/temas/:temaId/ejercicios-marcados
+ * Para el profesional dueño del grupo — regresa cada envío de progreso de
+ * ejercicios de ese tema (ver POST .../ejercicios-marcados arriba).
+ */
+router.get("/:id/temas/:temaId/ejercicios-marcados", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { data: grupo, error: grupoError } = await supabase
+      .from("grupos")
+      .select("id, profesional_id")
+      .eq("id", req.params.id)
+      .single();
+    if (grupoError || !grupo) return res.status(404).json({ error: "Grupo no encontrado." });
+    if (grupo.profesional_id !== req.user.id) {
+      return res.status(403).json({ error: "Este grupo no te pertenece." });
+    }
+
+    const { data: tema, error: temaError } = await supabase
+      .from("grupo_temas")
+      .select("id, grupo_id")
+      .eq("id", req.params.temaId)
+      .single();
+    if (temaError || !tema || tema.grupo_id !== grupo.id) {
+      return res.status(404).json({ error: "Tema no encontrado en este grupo." });
+    }
+
+    const { data, error } = await supabase
+      .from("ejercicios_marcados_alumno")
+      .select("id, nombre, indices_resueltos, total_ejercicios, created_at")
+      .eq("grupo_tema_id", tema.id)
+      .order("created_at", { ascending: false });
+    if (error) throw new Error(error.message);
+
+    res.json({ marcados: data || [] });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
