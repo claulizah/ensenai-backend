@@ -17,11 +17,17 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
  *    cantidades parecidas a un tema normal. Sigue gastando el límite
  *    mensual de TEMAS de siempre (ver resolverAccesoIndividual en
  *    routes/temas.js) — sin cambios de comportamiento.
- *  - "examen": resumen reducido al mínimo, muchos más ejercicios, y la
- *    trivia se vuelve un SIMULADOR (más preguntas, pensadas para resolverse
- *    contra reloj mezclando los temas). Gasta un contador MENSUAL APARTE
- *    (limite_examenes_mes, ver utils/planes.js y schema_v28.sql) — no toca
- *    el límite de temas normales.
+ *  - "examen": puro simulador de práctica — sin resumen, diagrama ni
+ *    actividad (nada de exposición, aquí solo se practica). Trae ejercicios
+ *    y/o trivia, lo que aplique según los temas combinados (la IA decide:
+ *    ejercicios si son de práctica/procedimiento, trivia si son de
+ *    comprensión/memorización, ambos si la mezcla lo amerita). Gasta un
+ *    contador MENSUAL APARTE (limite_examenes_mes, ver utils/planes.js y
+ *    schema_v28.sql) — no toca el límite de temas normales.
+ *    (31-ago-2026: antes "examen" solo reducía el resumen al mínimo pero
+ *    seguía trayendo diagrama, actividad y siempre AMBOS ejercicios y
+ *    trivia — la usuaria pidió algo más simple, "unicamente un simulador",
+ *    así que se reemplazó por esta versión sin exposición.)
  */
 
 function resumenTextoCorto(contenido) {
@@ -57,22 +63,24 @@ function buildPromptCombinar(temasFuente, modo, enfoque, instruccionesCorrectiva
 
   const instruccionActividad =
     modo === "grupo"
-      ? `Este repaso es para un GRUPO con perfiles de aprendizaje mezclados — genera UNA actividad ${
-          esExamen ? "breve de repaso cronometrado" : "de repaso"
-        } para CADA UNA de las 8 inteligencias (tabla completa).`
+      ? esExamen
+        ? `Este es un simulador puro — deja "actividades" como un arreglo de 8 elementos con "instrucciones" vacío ("") en cada uno (nada de dinámicas aquí, solo práctica).`
+        : `Este repaso es para un GRUPO con perfiles de aprendizaje mezclados — genera UNA actividad de repaso para CADA UNA de las 8 inteligencias (tabla completa).`
       : esExamen
-      ? "Genera UNA sola actividad — breve, de repaso cronometrado, no una dinámica larga."
+      ? `Este es un simulador puro — deja "actividad" con "titulo" y "instrucciones" vacíos ("") (nada de dinámicas aquí, solo práctica).`
       : "Genera UNA sola actividad de repaso que combine los temas de forma natural.";
 
   const proposito = esExamen
-    ? `Vas a armar un SIMULACRO DE EXAMEN que junta varios temas que la persona ya estudió por separado, para practicar contra reloj antes de una evaluación que los incluye a todos. Aquí lo que importa es PRACTICAR, no releer — nada de exposición larga.`
+    ? `Vas a armar un SIMULADOR DE EXAMEN que junta varios temas que la persona ya estudió por separado, para practicar contra reloj antes de una evaluación que los incluye a todos. Esto NO es material de estudio — es únicamente práctica: nada de resumen, diagrama ni actividad, solo ejercicios y/o trivia según lo que mejor sirva para estos temas.`
     : `Vas a armar un material de REPASO PARA EXAMEN que junta varios temas que la persona ya estudió por separado. El objetivo es ayudarle a repasar todo junto antes de una evaluación que los incluye a todos, encontrando las conexiones entre ellos cuando existan (no solo pegar los temas uno tras otro).`;
 
   const instruccionesEnfoque = esExamen
-    ? `- El resumen va MUY reducido — nada de secciones largas. Deja "secciones" vacío ([]) y usa solo "que_es" (2-3 líneas, el hilo conductor entre los temas) e "ideas_clave" (5 a 8 frases sueltas, una por cada cosa que no se puede olvidar el día del examen). Si hay una confusión típica entre los temas combinados, va en "ojo_aqui" — es más importante aquí que en un repaso normal.
-- Ejercicios: 10 a 15 si algún tema combinado es de práctica, 6 a 8 si todos son de comprensión — más que un repaso normal, porque la meta es practicar, no leer. Dificultad mezclada (no solo fáciles), y varios que solo se resuelven combinando más de un tema.
-- La trivia es un SIMULADOR: 15 a 20 preguntas que mezclan los temas entre sí, pensadas para resolverse una tras otra contra reloj — igual de cortas y directas que siempre, pero sin agrupar por tema (que no se note "aquí empiezan las de matemáticas").
-- "material_extra" debe incluir SIEMPRE un "repaso relámpago" (la chuleta rápida de 3-6 líneas que ya soporta el formato) con lo esencial de todos los temas — es lo primero que alguien relee minutos antes de entrar al examen.`
+    ? `- Deja "resumen" completamente vacío: "que_es":"", "secciones":[], "pasos":[], "ideas_clave":[], "ojo_aqui":"", "truco":"". Deja "diagrama" con "tipo":"ninguno". Deja "material_extra" vacío ([]) — nada de flashcards/memorama/repaso relámpago aquí, esto es solo simulacro de práctica, no material para repasar antes.
+- Decide TÚ, según la naturaleza de los temas combinados, qué combinación de "ejercicios" y "trivia" sirve más para practicar:
+  - Si los temas son de práctica/procedimiento (matemáticas, química, gramática con pasos): prioriza "ejercicios" (10 a 15), y deja "trivia" vacía ([]) si no aporta nada aquí.
+  - Si los temas son de comprensión/memorización (historia, biología conceptual, literatura, geografía): prioriza "trivia" como SIMULADOR (15 a 20 preguntas, pensadas para resolverse una tras otra contra reloj, mezclando los temas entre sí sin que se note "aquí empiezan las de historia"), y deja "ejercicios" vacío ([]) si no aplica.
+  - Si los temas combinados son una mezcla real de ambos tipos, incluye los dos, ajustando cantidades a qué tan presente está cada tipo.
+  - NUNCA dejes "ejercicios" Y "trivia" vacíos al mismo tiempo — siempre tiene que quedar al menos uno de los dos con contenido real.`
     : `- El resumen debe ser un repaso INTEGRADO: qué comparten los temas, en qué se diferencian o pueden confundirse, y las ideas clave de cada uno — no un resumen nuevo de cero de cada tema por separado.
 - La trivia y los ejercicios deben MEZCLAR los temas (algunas preguntas que solo se pueden responder si se entendieron varios de los temas a la vez), no ser un bloque de preguntas por tema.
 - Usa 8 a 12 preguntas de trivia (más que un tema normal, porque cubre más terreno) y 6 a 10 ejercicios si algún tema de los combinados es de práctica.`;
