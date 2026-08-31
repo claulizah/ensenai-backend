@@ -728,7 +728,12 @@ router.post("/combinar", requireBuyer, async (req, res) => {
       askClaude,
       generarFn,
       nombreCombinado,
-      { tipo: "material_tema", modo: modoFinal, edadObjetivo: edadNumericaAproximada(nivelPredominante) },
+      {
+        tipo: "material_tema",
+        modo: modoFinal,
+        enfoque: enfoqueFinal,
+        edadObjetivo: edadNumericaAproximada(nivelPredominante),
+      },
       2,
       { onProblemaDetectado: (problemas, intento) => console.warn(`[QA temas/combinar] intento ${intento}:`, problemas) }
     );
