@@ -530,10 +530,18 @@ async function intentarGenerar(prompt, bloquesImagen = []) {
  * utils/revisorCalidad.js para su paso de revisión con IA (revisarConIA).
  * No hace limpieza de ```json``` ni parseo: ese módulo espera texto plano
  * ("OK" o una lista "- problema"), no JSON.
+ *
+ * Usa Haiku (31-ago-2026, pedido de la usuaria: "que no se sienta tan
+ * tardado" al generar un tema) en vez del modelo grande que usa
+ * intentarGenerar(): este paso solo revisa reglas contra el material ya
+ * generado ("¿el nivel de lectura es el correcto? ¿faltan campos?"), no
+ * necesita creatividad — un modelo más chico y rápido aquí no baja la
+ * calidad del tema en sí (eso lo sigue generando claude-sonnet-5), solo
+ * acelera el paso de revisión.
  */
 async function askClaude(systemPrompt, mensajeUsuario, maxTokens = 1000) {
   const response = await anthropic.messages.create({
-    model: "claude-sonnet-5",
+    model: "claude-haiku-4-5-20251001",
     max_tokens: maxTokens,
     system: systemPrompt,
     messages: [{ role: "user", content: mensajeUsuario }],
