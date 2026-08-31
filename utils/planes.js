@@ -29,8 +29,15 @@ async function obtenerSettings() {
 
 /**
  * Plan individual activo del usuario (papás/adolescentes/adultos).
- * Regresa { nivel, precio_mxn, limite_temas_mes, limite_perfiles }.
- * limite_temas_mes = null significa ilimitado.
+ * Regresa { nivel, precio_mxn, limite_temas_mes, limite_perfiles,
+ * limite_examenes_mes }. limite_temas_mes/limite_examenes_mes = null
+ * significa ilimitado.
+ *
+ * limite_examenes_mes (schema_v28) es un contador APARTE del de temas —
+ * "Modo Examen" (combinar con enfoque:"examen", ver agents/combinarTemas.js
+ * y POST /api/temas/combinar) gasta de este límite, no del de temas
+ * normales. Un repaso combinado en enfoque:"estudio" (el de siempre) sigue
+ * gastando limite_temas_mes, sin cambios.
  */
 async function obtenerPlanIndividual(userId) {
   const settings = await obtenerSettings();
@@ -49,6 +56,7 @@ async function obtenerPlanIndividual(userId) {
       precio_mxn: settings.plan_individual_ilimitado_precio_mxn,
       limite_temas_mes: null,
       limite_perfiles: settings.plan_individual_ilimitado_limite_perfiles,
+      limite_examenes_mes: null,
     };
   }
   if (sus?.nivel === "aprendemos") {
@@ -57,6 +65,7 @@ async function obtenerPlanIndividual(userId) {
       precio_mxn: settings.plan_individual_aprendemos_precio_mxn,
       limite_temas_mes: settings.plan_individual_aprendemos_limite_temas,
       limite_perfiles: settings.plan_individual_aprendemos_limite_perfiles,
+      limite_examenes_mes: settings.plan_individual_aprendemos_limite_examenes,
     };
   }
   return {
@@ -64,6 +73,13 @@ async function obtenerPlanIndividual(userId) {
     precio_mxn: 0,
     limite_temas_mes: settings.plan_gratis_limite_temas_individual,
     limite_perfiles: settings.plan_gratis_limite_perfiles,
+    limite_examenes_mes: settings.plan_gratis_limite_examenes,
+    // "Boost" de bienvenida (schema_v30, gancho de crecimiento ago-2026):
+    // cuentas Gratis nuevas pueden generar hasta este límite en vez del
+    // normal, pero SOLO durante el mes calendario en que se registraron —
+    // ver resolverAccesoIndividual en routes/temas.js, que es quien decide
+    // si aplica según la fecha de creación de la cuenta.
+    limite_gratis_boost: settings.plan_gratis_boost_limite_temas,
   };
 }
 
