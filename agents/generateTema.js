@@ -309,8 +309,9 @@ El objetivo es que se entiendan de una sola leída, sin que nadie tenga que rele
 
 ## 4. MATERIAL EXTRA
 Elige 1 o 2 recursos adecuados para la edad: flashcards, memorama, crucigrama, mini-glosario, relacionar columnas, completar conceptos, línea del tiempo, o tarjetas de preguntas. No incluyas recursos innecesarios.
-Si eliges memorama, relacionar columnas o flashcards, genera directamente el contenido real de las tarjetas (los pares término/definición o pregunta/respuesta completos y listos para recortar), no solo la instrucción de "hagan tarjetas".
-Si el tema lo amerita, agrega al final del material extra un mini "repaso relámpago": una lista muy breve (3-6 líneas) con lo esencial para repasar justo antes de un examen o evaluación, en formato de chuleta rápida.
+Si eliges flashcards, memorama, relacionar columnas o tarjetas de preguntas (recursos que son literalmente tarjetas para recortar), NO los redactes como un párrafo: llena el arreglo "tarjetas" con cada tarjeta por separado (ver FORMATO DE SALIDA) — una tarjeta por cada par término/definición o pregunta/respuesta, completos y listos para imprimir y recortar. Dentro de "contenido" deja solo una instrucción de una línea sobre cómo usarlas (ej. "Recorta cada tarjeta y júntalas en pares." o "Recorta y repasa una por una."), nunca el contenido de las tarjetas mismo.
+Para crucigrama, mini-glosario o línea del tiempo (no son tarjetas para recortar), sigue describiéndolos en "contenido" como texto y deja "tarjetas" vacío ([]).
+Si el tema lo amerita, agrega al final del material extra un mini "repaso relámpago" de tipo "tarjetas": 3 a 6 tarjetas con lo esencial para repasar justo antes de un examen o evaluación, una idea muy breve por tarjeta en "frente" y "reverso" vacío ("").
 
 ## 5. RESPUESTAS
 Incluye: respuestas de la trivia, solución o resultado esperado de la actividad, 3 conceptos que el estudiante debería recordar, y una pregunta final de autoevaluación.
@@ -349,7 +350,7 @@ ${
   "actividades": [ { "inteligencia": "linguistica|logico_matematica|espacial|musical|kinestesica|interpersonal|intrapersonal|naturalista", "titulo": "...", "instrucciones": "..." } ],
   "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["...", "..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
-  "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "..." } ],
+  "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "...", "tarjetas": [ { "frente": "...", "reverso": "..." } ] } ],
   "respuestas": {
     "trivia_resuelta": [ { "pregunta": "...", "respuesta": "..." } ],
     "solucion_actividad": "...",
@@ -374,7 +375,7 @@ ${
   "actividad": { "titulo": "...", "instrucciones": "..." },
   "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["...", "..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
-  "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "..." } ],
+  "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "...", "tarjetas": [ { "frente": "...", "reverso": "..." } ] } ],
   "respuestas": {
     "trivia_resuelta": [ { "pregunta": "...", "respuesta": "..." } ],
     "solucion_actividad": "...",
@@ -389,6 +390,7 @@ RECORDATORIOS DE FORMATO (los errores más comunes):
 - \`pasos\`, \`ideas_clave\` y \`ejercicios[].pasos\` son ARREGLOS. Un elemento por paso o por idea. Nunca metas "1. … 2. … 3. …" dentro de un solo string.
 - \`ojo_aqui\` y \`truco\` pueden ir vacíos ("") si no aplican al tema. Es preferible dejarlos vacíos a inventar algo forzado.
 - Deja \`pasos\` vacío ([]) si el tema no es un procedimiento.
+- En \`material_extra\`, si el tipo es flashcards, memorama, relacionar o tarjetas, llena \`tarjetas\` con una tarjeta por elemento (frente/reverso) — NUNCA metas los pares o las tarjetas como texto corrido dentro de \`contenido\`. Para crucigrama, glosario o línea del tiempo, deja \`tarjetas\` en [] y sigue usando \`contenido\` como texto.
 
 Mantén un tono educativo, claro, positivo y adecuado para la edad.`;
 }
