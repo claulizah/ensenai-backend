@@ -8,6 +8,7 @@ const bundlesRouter = require("./routes/bundles");
 const aprendizajeRouter = require("./routes/aprendizaje");
 const gruposRouter = require("./routes/grupos");
 const temasRouter = require("./routes/temas");
+const referidosRouter = require("./routes/referidos");
 const { stripeWebhookHandler } = require("./routes/stripeWebhook");
 const { inboundEmailWebhookHandler } = require("./routes/inboundEmail");
 
@@ -55,6 +56,7 @@ app.use("/api/bundles", bundlesRouter);
 app.use("/api/aprendizaje", aprendizajeRouter);
 app.use("/api/grupos", gruposRouter);
 app.use("/api/temas", temasRouter);
+app.use("/api/referidos", referidosRouter);
 
 app.use((err, req, res, next) => {
   if (err.code === "LIMIT_FILE_SIZE") {
