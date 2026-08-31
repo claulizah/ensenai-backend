@@ -104,18 +104,42 @@ const TECNICAS_POR_NIVEL = {
  * la liga de grupo de maestros/psicólogos — un salón tiene perfiles
  * mezclados, así que se genera UNA actividad por cada una de las 8
  * inteligencias (tabla completa), no solo la(s) dominante(s) de una persona.
+ * @param {"escolar"|"psicoeducativo"} enfoque - "escolar" (default): material
+ * tipo clase, con ejercicios de práctica académica. "psicoeducativo": mismo
+ * JSON de salida, pero la actividad y los "ejercicios" dejan de ser
+ * dinámicas/tareas escolares y pasan a ser estrategias de afrontamiento,
+ * regulación emocional o práctica para casa — pensado para uso en terapia,
+ * orientación o consulta psicológica (ver liga de grupo para psicólogos).
  */
-function buildPrompt(tema, nivel, perfilDominante, modo = "individual", detalles = "", tieneImagenes = false) {
+function buildPrompt(tema, nivel, perfilDominante, modo = "individual", detalles = "", tieneImagenes = false, enfoque = "escolar") {
   const nivelLabel = ETIQUETAS_NIVEL[nivel] || "Primaria alta";
   const edadLabel = EDAD_APROX[nivel] || "9-12";
+  const esPsicoeducativo = enfoque === "psicoeducativo";
 
   const tiposAUsar = modo === "grupo" ? TIPOS_TODOS : perfilDominante && perfilDominante.length ? perfilDominante : ["linguistica"];
   const inteligenciasLabel = tiposAUsar.map((t) => ETIQUETAS_INTELIGENCIA[t] || t).join(", ");
 
-  const instruccionActividad =
-    modo === "grupo"
+  const instruccionActividad = esPsicoeducativo
+    ? modo === "grupo"
+      ? `Este material es para un GRUPO de pacientes/consultantes con perfiles mezclados — genera UNA actividad para CADA UNA de las 8 inteligencias (tabla completa), pero cada una debe ser una forma distinta de trabajar el tema desde lo emocional (afrontamiento, regulación, reflexión), no una dinámica escolar.`
+      : `Adapta TODO el contenido a la edad e inteligencia(s) indicadas. La actividad debe ser UNA estrategia de afrontamiento, regulación emocional o práctica para casa relacionada con el tema — no una dinámica de tipo escolar. Si se indican varias inteligencias, combina sus técnicas de manera natural en esa única actividad.`
+    : modo === "grupo"
       ? `Este material es para un GRUPO (salón de clase o grupo de pacientes) con perfiles de aprendizaje mezclados — genera UNA actividad para CADA UNA de las 8 inteligencias (tabla completa), no elijas solo una o dos. Así el profesional puede repartir la actividad adecuada según cada estudiante.`
       : `Adapta TODO el contenido a la edad, grupo escolar, e inteligencia(s) predominante(s) indicadas. Si se indican varias inteligencias, combina sus técnicas de manera natural en UNA sola actividad (no generes una tabla de las 8).`;
+
+  const bloqueEnfoquePsicoeducativo = esPsicoeducativo
+    ? `
+
+ENFOQUE: APOYO PSICOEDUCATIVO (esto NO es material escolar)
+Este material se usa en un contexto de acompañamiento psicológico o emocional (terapia, orientación, consulta), no en un salón de clase. Ajusta TODO el material a ese contexto, incluyendo el JSON de salida más abajo (los mismos campos, pero con este contenido):
+- Tono cálido, validante y sin juzgar — nunca en tono de examen o evaluación académica. Evita palabras como "calificación", "error" o "incorrecto"; usa "vamos a explorar otra forma de verlo" en su lugar.
+- No diagnostiques ni asumas que un ejemplo describe la vida real de quien lo usa. Plantea las situaciones como hipotéticas o generales ("imagina que...", "a veces pasa que...", "algunas personas sienten...").
+- Sección 2 (actividad): en vez de una dinámica escolar, es UNA estrategia concreta de afrontamiento, regulación emocional o comunicación relacionada con el tema, para practicar en casa o entre sesiones.
+- Sección 2B ("ejercicios" en el JSON): usa los mismos campos (\`enunciado\`, \`pista\`, \`pasos\`, \`respuesta\`) pero con contenido práctico, no académico — por ejemplo un registro de pensamientos/emociones, una práctica guiada paso a paso de una técnica (respiración, reestructuración cognitiva, comunicación asertiva) o un ejercicio para hacer en familia. \`pasos\` es el procedimiento concreto a seguir; \`respuesta\` es la reflexión o el resultado esperado, no "la solución correcta".
+- Trivia y repaso: preguntas para recordar y aplicar lo trabajado en la sesión (evocación activa), nunca con formato ni tono de examen.
+- Material extra: recursos para practicar en casa (tarjetas con frases de afrontamiento, registro de emociones, etc.), no material de estudio escolar.
+- Si el tema no es de contexto escolar, usa "la persona" o "quien participa" en vez de "el estudiante" o "el alumno" en el material.`
+    : "";
 
   const tecnicasNivel = TECNICAS_POR_NIVEL[nivel];
   const bloqueTecnicasNivel = tecnicasNivel
@@ -153,6 +177,7 @@ REGLA PRINCIPAL
 Adapta TODO el contenido a la edad y grupo escolar indicados.
 No uses vocabulario, actividades ni preguntas de un nivel superior al correspondiente.
 ${instruccionActividad}
+${bloqueEnfoquePsicoeducativo}
 
 IMPORTANTE:
 Las inteligencias representan diferentes formas de acercarse y practicar el contenido, no "estilos fijos" de aprendizaje.
@@ -517,7 +542,8 @@ async function askClaude(systemPrompt, mensajeUsuario, maxTokens = 1000) {
 async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individual", opciones = {}) {
   const detalles = String(opciones.detalles || "").trim().slice(0, 1500);
   const bloquesImagen = normalizarImagenes(opciones.imagenes);
-  const prompt = buildPrompt(tema, nivel, perfilDominante, modo, detalles, bloquesImagen.length > 0);
+  const enfoque = opciones.enfoque === "psicoeducativo" ? "psicoeducativo" : "escolar";
+  const prompt = buildPrompt(tema, nivel, perfilDominante, modo, detalles, bloquesImagen.length > 0, enfoque);
 
   try {
     return await intentarGenerar(prompt, bloquesImagen);
@@ -532,4 +558,12 @@ async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individ
   }
 }
 
-module.exports = { generarMaterialTema, normalizarContenido, askClaude, ETIQUETAS_NIVEL, EDAD_APROX, ETIQUETAS_INTELIGENCIA };
+module.exports = {
+  generarMaterialTema,
+  normalizarContenido,
+  normalizarImagenes,
+  askClaude,
+  ETIQUETAS_NIVEL,
+  EDAD_APROX,
+  ETIQUETAS_INTELIGENCIA,
+};

@@ -125,11 +125,22 @@ function normalizarResumen(resumen) {
  * (mismo patrón que agents/pdf.js: para que el papá/mamá/maestro revise
  * sin que el estudiante la vea mientras resuelve).
  *
+ * `incluirRespuestas` (nuevo, para compartir con grupo/Modo Examen): cuando
+ * es `false`, se omite por completo la "Hoja de respuestas" final — pensado
+ * para que un maestro pueda generar un imprimible "en blanco" para repartir
+ * al grupo, y otro "con respuestas" para su propio uso, del mismo material.
+ * Todo lo demás del documento (portada, actividad, ejercicios, trivia sin
+ * resolver, material extra) es idéntico en ambos casos.
+ *
  * @param {object} contenido - el JSON que regresa generarMaterialTema()
  * @param {"individual"|"grupo"} modo
+ * @param {object} [opciones]
+ * @param {boolean} [opciones.incluirRespuestas=true] - si es false, no se
+ * agrega la página final de "Hoja de respuestas".
  * @returns {Promise<string>} ruta local del PDF generado (temporal)
  */
-function generarPdfTema(contenidoOriginal, modo = "individual") {
+function generarPdfTema(contenidoOriginal, modo = "individual", opciones = {}) {
+  const incluirRespuestas = opciones.incluirRespuestas !== false;
   // Se limpia una sola vez, al entrar: de aquí para abajo todo el texto ya
   // es seguro de imprimir con la fuente del PDF (ver limpiarTexto arriba).
   const contenido = limpiarContenido(contenidoOriginal);
@@ -456,69 +467,73 @@ function generarPdfTema(contenidoOriginal, modo = "individual") {
     }
 
     // --- Hoja de respuestas, en una página nueva y al final ---
-    const r = contenido.respuestas || {};
-    doc.addPage();
-    doc.rect(0, 0, doc.page.width, 56).fill(BOSQUE);
-    doc.fillColor("#FFFFFF").fontSize(17).font("Helvetica-Bold").text("Hoja de respuestas", doc.page.margins.left, 18);
-    doc.y = 76;
-    doc
-      .fillColor(GRIS)
-      .fontSize(9.5)
-      .font("Helvetica-Oblique")
-      .text("Para el papá, la mamá, o el profesional — revisa aquí sin que el estudiante la vea mientras resuelve.");
-    salto(1);
+    // Se omite por completo cuando incluirRespuestas es false (imprimible
+    // "en blanco" para repartir, ver docstring de generarPdfTema arriba).
+    if (incluirRespuestas) {
+      const r = contenido.respuestas || {};
+      doc.addPage();
+      doc.rect(0, 0, doc.page.width, 56).fill(BOSQUE);
+      doc.fillColor("#FFFFFF").fontSize(17).font("Helvetica-Bold").text("Hoja de respuestas", doc.page.margins.left, 18);
+      doc.y = 76;
+      doc
+        .fillColor(GRIS)
+        .fontSize(9.5)
+        .font("Helvetica-Oblique")
+        .text("Para el papá, la mamá, o el profesional — revisa aquí sin que el estudiante la vea mientras resuelve.");
+      salto(1);
 
-    if (r.trivia_resuelta?.length) {
-      tituloSeccion("Trivia resuelta");
-      r.trivia_resuelta.forEach((rt) => {
-        doc
-          .fillColor(TEXTO)
-          .fontSize(10.5)
-          .font("Helvetica-Bold")
-          .text(`${rt.pregunta} `, doc.page.margins.left, doc.y, { continued: true, width: contentWidth() })
-          .font("Helvetica")
-          .fillColor(BOSQUE)
-          .text(`— ${rt.respuesta}`);
-        salto(0.2);
-      });
-      salto(0.6);
-    }
-
-    if (ejercicios.length) {
-      tituloSeccion("Soluciones de los ejercicios", AZUL_PROFUNDO);
-      ejercicios.forEach((e, i) => {
-        asegurarEspacio(60);
-        doc
-          .fillColor(TEXTO)
-          .fontSize(10.5)
-          .font("Helvetica-Bold")
-          .text(`${i + 1}. ${e.enunciado || ""}`, { width: contentWidth(), lineGap: 2 });
-        (e.pasos || []).forEach((p) => {
-          doc.fillColor("#4A6A85").fontSize(10).font("Helvetica").text(`    ${p}`, { width: contentWidth(), lineGap: 2 });
+      if (r.trivia_resuelta?.length) {
+        tituloSeccion("Trivia resuelta");
+        r.trivia_resuelta.forEach((rt) => {
+          doc
+            .fillColor(TEXTO)
+            .fontSize(10.5)
+            .font("Helvetica-Bold")
+            .text(`${rt.pregunta} `, doc.page.margins.left, doc.y, { continued: true, width: contentWidth() })
+            .font("Helvetica")
+            .fillColor(BOSQUE)
+            .text(`— ${rt.respuesta}`);
+          salto(0.2);
         });
-        if (e.respuesta) {
-          doc.fillColor(BOSQUE).fontSize(10.5).font("Helvetica-Bold").text(`    Respuesta: ${e.respuesta}`);
-        }
-        salto(0.45);
-      });
-      salto(0.5);
-    }
+        salto(0.6);
+      }
 
-    if (r.solucion_actividad) {
-      tituloSeccion("Solución de la actividad");
-      doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(r.solucion_actividad, { lineGap: 3 });
-      salto(0.8);
-    }
+      if (ejercicios.length) {
+        tituloSeccion("Soluciones de los ejercicios", AZUL_PROFUNDO);
+        ejercicios.forEach((e, i) => {
+          asegurarEspacio(60);
+          doc
+            .fillColor(TEXTO)
+            .fontSize(10.5)
+            .font("Helvetica-Bold")
+            .text(`${i + 1}. ${e.enunciado || ""}`, { width: contentWidth(), lineGap: 2 });
+          (e.pasos || []).forEach((p) => {
+            doc.fillColor("#4A6A85").fontSize(10).font("Helvetica").text(`    ${p}`, { width: contentWidth(), lineGap: 2 });
+          });
+          if (e.respuesta) {
+            doc.fillColor(BOSQUE).fontSize(10.5).font("Helvetica-Bold").text(`    Respuesta: ${e.respuesta}`);
+          }
+          salto(0.45);
+        });
+        salto(0.5);
+      }
 
-    if (r.conceptos_clave?.length) {
-      tituloSeccion("Conceptos clave");
-      r.conceptos_clave.forEach((k) => doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(`•  ${k}`));
-      salto(0.8);
-    }
+      if (r.solucion_actividad) {
+        tituloSeccion("Solución de la actividad");
+        doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(r.solucion_actividad, { lineGap: 3 });
+        salto(0.8);
+      }
 
-    if (r.autoevaluacion) {
-      tituloSeccion("Autoevaluación");
-      doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(r.autoevaluacion, { lineGap: 3 });
+      if (r.conceptos_clave?.length) {
+        tituloSeccion("Conceptos clave");
+        r.conceptos_clave.forEach((k) => doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(`•  ${k}`));
+        salto(0.8);
+      }
+
+      if (r.autoevaluacion) {
+        tituloSeccion("Autoevaluación");
+        doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(r.autoevaluacion, { lineGap: 3 });
+      }
     }
 
     doc.end();
