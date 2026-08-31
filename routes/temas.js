@@ -491,6 +491,87 @@ router.post("/mios/:id/respuestas", requireBuyer, async (req, res) => {
 });
 
 /**
+ * GET /api/temas/mios/:id/ejercicios-resueltos
+ * PUT  /api/temas/mios/:id/ejercicios-resueltos  body: { indices: number[] }
+ *
+ * Checkbox ligero de "ya la resolví" para la pestaña Practicar en modo
+ * individual (31-ago-2026) — equivalente a POST/GET
+ * /api/grupos/publico/:slug/temas/:temaId/ejercicios-marcados (modo grupo),
+ * pero pensado para una sola persona en vez de un salón: en lugar de ir
+ * guardando un registro por cada clic (ahí el profe necesita ver el
+ * historial de cada alumno), aquí basta con UN solo estado que se
+ * sobrescribe (upsert) — la persona solo necesita ver, la próxima vez que
+ * abre el tema, cuáles ejercicios ya había marcado.
+ *
+ * Los índices se limpian contra el total real de ejercicios del tema
+ * guardado (nunca se confía en lo que mande el cliente), igual que en
+ * grupos.js.
+ */
+router.get("/mios/:id/ejercicios-resueltos", requireBuyer, async (req, res) => {
+  if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
+  try {
+    const { data: tema, error: temaError } = await supabase
+      .from("mis_temas")
+      .select("id")
+      .eq("id", req.params.id)
+      .eq("user_id", req.user.id)
+      .single();
+    if (temaError || !tema) return res.status(404).json({ error: "Tema no encontrado." });
+
+    const { data, error } = await supabase
+      .from("ejercicios_resueltos_individual")
+      .select("indices_resueltos, total_ejercicios")
+      .eq("mis_tema_id", tema.id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+
+    res.json({
+      indices_resueltos: data?.indices_resueltos || [],
+      total_ejercicios: data?.total_ejercicios || 0,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put("/mios/:id/ejercicios-resueltos", requireBuyer, async (req, res) => {
+  if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
+  try {
+    const { data: tema, error: temaError } = await supabase
+      .from("mis_temas")
+      .select("id, contenido")
+      .eq("id", req.params.id)
+      .eq("user_id", req.user.id)
+      .single();
+    if (temaError || !tema) return res.status(404).json({ error: "Tema no encontrado." });
+
+    const totalEjercicios = Array.isArray(tema.contenido?.ejercicios) ? tema.contenido.ejercicios.length : 0;
+    const indicesRecibidos = Array.isArray(req.body.indices) ? req.body.indices : [];
+    const indices = [
+      ...new Set(
+        indicesRecibidos.map(Number).filter((i) => Number.isInteger(i) && i >= 0 && i < totalEjercicios)
+      ),
+    ];
+
+    const { error } = await supabase.from("ejercicios_resueltos_individual").upsert(
+      {
+        mis_tema_id: tema.id,
+        user_id: req.user.id,
+        indices_resueltos: indices,
+        total_ejercicios: totalEjercicios,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "mis_tema_id" }
+    );
+    if (error) throw new Error(error.message);
+
+    res.json({ status: "progreso_guardado", indices_resueltos: indices, total_ejercicios: totalEjercicios });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * POST /api/temas/pdf
  * body: { contenido, modo?, temaId? }
  * Genera el imprimible en PDF de un tema ya generado (ver POST /generar)
