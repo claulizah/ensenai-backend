@@ -1,0 +1,380 @@
+From 9e3099de93606a50284be63496a41c2463e421fa Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 31 Aug 2026 19:54:31 +0000
+Subject: [PATCH] Agregar seguimiento de progreso/dominio en modo individual
+ (Mi progreso)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+El diferencial elegido tras comparar qué da EnseñAI que no dé un chat
+suelto: memoria de sesiones anteriores. Antes la trivia de un tema en
+tema.html se calificaba solo en el navegador sin dejar rastro. Ahora:
+
+- POST /api/temas/mios/:id/respuestas guarda cada intento (autenticado,
+  recalcula "acerto" server-side igual que en modo grupo).
+- GET /api/temas/mi-progreso agrega por tema: promedio, primer/último
+  intento (para ver si mejoró), y marca necesita_repaso si promedio<60%.
+- utils/trivia.js: se extrajo verificarRespuestas() de routes/grupos.js
+  (antes duplicada) para reutilizarla en ambos modos.
+
+Mismo alcance por cuenta (no por perfil/hijo) que el resto de
+gamificación, documentado en el código. Pendiente correr
+db/schema_v32.sql.
+---
+ db/schema_v32.sql |  36 +++++++++++
+ routes/grupos.js  |  50 +---------------
+ routes/temas.js   | 148 ++++++++++++++++++++++++++++++++++++++++++++++
+ utils/trivia.js   |  58 ++++++++++++++++++
+ 4 files changed, 243 insertions(+), 49 deletions(-)
+ create mode 100644 db/schema_v32.sql
+ create mode 100644 utils/trivia.js
+
+diff --git a/db/schema_v32.sql b/db/schema_v32.sql
+new file mode 100644
+index 0000000..d4b751f
+--- /dev/null
++++ b/db/schema_v32.sql
+@@ -0,0 +1,36 @@
++-- Esquema EnseñAI v32 — correr en el SQL Editor de Supabase (después de v1-v31)
++--
++-- Seguimiento de progreso/dominio para modo individual (31-ago-2026): el
++-- diferencial que se decidió construir después de comparar "qué puede dar
++-- EnseñAI que no dé simplemente preguntarle a un chat suelto" — memoria de
++-- sesiones anteriores. Hasta ahora la trivia de un tema (tema.html) se
++-- calificaba solo en el navegador y no dejaba ningún rastro; esta tabla es
++-- el equivalente de respuestas_alumno (schema_v27, modo grupo) pero para
++-- el historial individual autenticado — sin "nombre": ya sabemos quién es
++-- por el usuario dueño del tema.
++
++create table if not exists respuestas_trivia_individual (
++  id uuid primary key default gen_random_uuid(),
++  mis_tema_id uuid references mis_temas(id) on delete cascade not null,
++  user_id uuid not null references auth.users(id) on delete cascade,
++  -- [{ pregunta, respuesta, respuesta_correcta, acerto (true/false/null) }]
++  respuestas jsonb not null,
++  aciertos integer not null default 0,
++  total_cerradas integer not null default 0,
++  created_at timestamptz default now()
++);
++
++create index if not exists respuestas_trivia_individual_tema_idx
++  on respuestas_trivia_individual(mis_tema_id);
++create index if not exists respuestas_trivia_individual_user_idx
++  on respuestas_trivia_individual(user_id);
++
++-- Igual que el resto de tablas de datos de usuario de esta app: la toca
++-- solo el backend con la service role key. Actívale Row Level Security
++-- desde el dashboard sin agregar policies (deny-all para el anon key) si
++-- quieres mantener el mismo patrón que mis_temas, respuestas_alumno, etc.
++--
++-- Nota de alcance: por CUENTA, no por perfil/hijo — mis_temas no guarda
++-- con qué perfil se generó cada tema (ver utils/gamificacion.js para la
++-- misma limitación en la racha). En una cuenta con varios hijos, GET
++-- /api/temas/mi-progreso junta el progreso de todos.
+diff --git a/routes/grupos.js b/routes/grupos.js
+index 2fa271a..cce9891 100644
+--- a/routes/grupos.js
++++ b/routes/grupos.js
+@@ -4,6 +4,7 @@ const { slugify } = require("../utils/slugify");
+ const { requireBuyer } = require("../middleware/auth");
+ const { obtenerPlanGrupo, inicioDeMes } = require("../utils/planes");
+ const { primerNombre } = require("../utils/nombre");
++const { verificarRespuestas } = require("../utils/trivia");
+ const supabase = require("../db/supabase");
+ 
+ const router = express.Router();
+@@ -13,55 +14,6 @@ function getStripe() {
+   return new Stripe(process.env.STRIPE_SECRET_KEY);
+ }
+ 
+-// Misma normalización que usa g.html en el navegador (normalizarTexto) —
+-// tiene que coincidir para que una respuesta correcta no se marque como
+-// incorrecta solo por mayúsculas o espacios de más.
+-function normalizarTexto(s) {
+-  return (s || "").toString().trim().toLowerCase();
+-}
+-
+-/**
+- * Recalcula "acerto" pregunta por pregunta usando el contenido REAL del
+- * tema guardado en la base de datos (contenido.trivia), no lo que haya
+- * mandado el cliente — así una respuesta manipulada desde las herramientas
+- * de desarrollador no puede aparecer como "correcta" en el reporte del
+- * profesor. Server siempre gana: pregunta, respuesta_correcta y acerto que
+- * salen de aquí sustituyen lo que mandó el cliente; solo "respuesta" (lo
+- * que la persona realmente contestó) es del cliente, porque eso no hay
+- * forma de conocerlo del lado del servidor.
+- */
+-function verificarRespuestas(contenido, respuestasCliente) {
+-  const triviaOriginal = Array.isArray(contenido?.trivia) ? contenido.trivia : [];
+-
+-  return respuestasCliente.map((r) => {
+-    const original = Number.isInteger(r.indice) ? triviaOriginal[r.indice] : undefined;
+-
+-    // No pudimos ubicar la pregunta original (tema editado, índice raro,
+-    // etc.) — guardamos lo que llegó pero sin confiar en su calificación.
+-    if (!original) {
+-      return {
+-        pregunta: typeof r.pregunta === "string" ? r.pregunta : "",
+-        respuesta: typeof r.respuesta === "string" ? r.respuesta : null,
+-        respuesta_correcta: typeof r.respuesta_correcta === "string" ? r.respuesta_correcta : "",
+-        acerto: null,
+-      };
+-    }
+-
+-    const esCerrada = Array.isArray(original.opciones) && original.opciones.length > 0;
+-    const respuesta = typeof r.respuesta === "string" ? r.respuesta : null;
+-    const acerto = esCerrada
+-      ? !!respuesta && normalizarTexto(respuesta) === normalizarTexto(original.respuesta_correcta)
+-      : null; // abierta: nunca se autocalifica, ni aquí ni en g.html
+-
+-    return {
+-      pregunta: original.pregunta || "",
+-      respuesta,
+-      respuesta_correcta: original.respuesta_correcta || "",
+-      acerto,
+-    };
+-  });
+-}
+-
+ function requireSupabase(res) {
+   if (!supabase) {
+     res.status(500).json({
+diff --git a/routes/temas.js b/routes/temas.js
+index 4329898..62e0800 100644
+--- a/routes/temas.js
++++ b/routes/temas.js
+@@ -9,6 +9,7 @@ const { requireBuyer } = require("../middleware/auth");
+ const { obtenerPlanIndividual, inicioDeMes } = require("../utils/planes");
+ const { registrarActividad, obtenerEstadoGamificacion, armarTriviaDiaria } = require("../utils/gamificacion");
+ const { obtenerOCrearCodigo, obtenerBono, consumirBono } = require("../utils/referidos");
++const { verificarRespuestas } = require("../utils/trivia");
+ const supabase = require("../db/supabase");
+ 
+ const router = express.Router();
+@@ -434,6 +435,61 @@ router.patch("/mios/:id", requireBuyer, async (req, res) => {
+   }
+ });
+ 
++/**
++ * POST /api/temas/mios/:id/respuestas
++ * body: { respuestas: [{ indice, pregunta, respuesta, respuesta_correcta, acerto }] }
++ * Guarda cómo contestó la trivia de UN tema del historial individual —
++ * equivalente a POST /api/grupos/publico/:slug/temas/:temaId/respuestas
++ * pero para modo individual (autenticado, sin "nombre": ya sabemos quién
++ * es por el token). Es la pieza que faltaba para el seguimiento de
++ * progreso/dominio (ver GET /mi-progreso): antes la trivia de un tema se
++ * calificaba solo en el navegador y no dejaba ningún rastro.
++ *
++ * Igual que en grupos.js, "acerto" nunca se toma tal cual del cliente:
++ * verificarRespuestas() lo recalcula leyendo la trivia real desde
++ * mis_temas.contenido. Si falla el guardado no se le avisa a la persona —
++ * ya vio su calificación en pantalla, esto es solo para su historial.
++ *
++ * Nota sobre alcance: esto vive por CUENTA, no por perfil/hijo — igual que
++ * la racha (ver utils/gamificacion.js) — porque mis_temas no guarda con
++ * qué perfil se generó cada tema, solo un snapshot de la inteligencia
++ * usada. En una cuenta con varios hijos, "Mi progreso" junta a todos.
++ */
++router.post("/mios/:id/respuestas", requireBuyer, async (req, res) => {
++  if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
++  try {
++    const { data: tema, error: temaError } = await supabase
++      .from("mis_temas")
++      .select("id, contenido")
++      .eq("id", req.params.id)
++      .eq("user_id", req.user.id)
++      .single();
++    if (temaError || !tema) return res.status(404).json({ error: "Tema no encontrado." });
++
++    const { respuestas } = req.body;
++    if (!Array.isArray(respuestas) || respuestas.length === 0) {
++      return res.status(400).json({ error: "Faltan respuestas." });
++    }
++
++    const respuestasVerificadas = verificarRespuestas(tema.contenido, respuestas);
++    const cerradas = respuestasVerificadas.filter((r) => r.acerto === true || r.acerto === false);
++    const aciertos = cerradas.filter((r) => r.acerto === true).length;
++
++    const { error } = await supabase.from("respuestas_trivia_individual").insert({
++      mis_tema_id: tema.id,
++      user_id: req.user.id,
++      respuestas: respuestasVerificadas,
++      aciertos,
++      total_cerradas: cerradas.length,
++    });
++    if (error) throw new Error(error.message);
++
++    res.json({ status: "respuestas_guardadas" });
++  } catch (err) {
++    res.status(500).json({ error: err.message });
++  }
++});
++
+ /**
+  * POST /api/temas/pdf
+  * body: { contenido, modo?, temaId? }
+@@ -722,4 +778,96 @@ router.post("/trivia-diaria/completar", requireBuyer, async (req, res) => {
+   }
+ });
+ 
++/**
++ * GET /api/temas/mi-progreso
++ * El "gancho" pedido para papás/alumnos: no solo racha de actividad sino
++ * de DOMINIO — qué tema ya se domina y cuál sigue flojo, usando las
++ * respuestas de trivia guardadas por tema (ver POST /mios/:id/respuestas).
++ * Es justo lo que un chat suelto no puede dar: requiere recordar sesiones
++ * anteriores, no solo la de ahorita.
++ *
++ * Un tema puede tener varios intentos (la persona puede volver a hacer la
++ * trivia); aquí se resume cada tema por su promedio, su primer y su último
++ * intento (para ver si mejoró), y se marca `necesita_repaso` cuando el
++ * promedio es menor a 60%. Se ordena con los que necesitan repaso primero
++ * y, dentro de cada grupo, por actividad más reciente.
++ *
++ * Solo entran temas con al menos un intento con preguntas cerradas
++ * (opción/verdadero-falso) — las trivias 100% de preguntas abiertas no se
++ * autocalifican, así que no hay con qué medir dominio.
++ *
++ * Mismo alcance por CUENTA (no por perfil/hijo) que el resto de
++ * gamificación — ver la nota en POST /mios/:id/respuestas.
++ */
++router.get("/mi-progreso", requireBuyer, async (req, res) => {
++  if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
++  try {
++    const { data: temas, error: temasError } = await supabase
++      .from("mis_temas")
++      .select("id, tema, etiquetas")
++      .eq("user_id", req.user.id);
++    if (temasError) throw new Error(temasError.message);
++
++    const temaIds = (temas || []).map((t) => t.id);
++    if (temaIds.length === 0) {
++      return res.json({ resumen: { temas_con_trivia: 0, promedio_general: null, total_intentos: 0 }, temas: [] });
++    }
++    const temasPorId = Object.fromEntries((temas || []).map((t) => [t.id, t]));
++
++    const { data: intentos, error: intentosError } = await supabase
++      .from("respuestas_trivia_individual")
++      .select("mis_tema_id, aciertos, total_cerradas, created_at")
++      .in("mis_tema_id", temaIds)
++      .order("created_at", { ascending: true });
++    if (intentosError) throw new Error(intentosError.message);
++
++    // Agrupa los intentos por tema, quedándose solo con los que sí tuvieron
++    // preguntas cerradas (con esas se puede calcular un %).
++    const porTema = {};
++    (intentos || []).forEach((i) => {
++      if (!i.total_cerradas) return;
++      porTema[i.mis_tema_id] = porTema[i.mis_tema_id] || [];
++      porTema[i.mis_tema_id].push({
++        porcentaje: Math.round((i.aciertos / i.total_cerradas) * 100),
++        fecha: i.created_at,
++      });
++    });
++
++    const resultado = Object.entries(porTema)
++      .map(([temaId, lista]) => {
++        const tema = temasPorId[temaId];
++        if (!tema) return null; // por si acaso (tema borrado, etc.)
++        const promedio = Math.round(lista.reduce((sum, x) => sum + x.porcentaje, 0) / lista.length);
++        return {
++          mis_tema_id: temaId,
++          tema: tema.tema,
++          etiquetas: tema.etiquetas || [],
++          intentos: lista.length,
++          primer_porcentaje: lista[0].porcentaje,
++          ultimo_porcentaje: lista[lista.length - 1].porcentaje,
++          promedio_porcentaje: promedio,
++          ultima_fecha: lista[lista.length - 1].fecha,
++          necesita_repaso: promedio < 60,
++        };
++      })
++      .filter(Boolean)
++      .sort((a, b) => {
++        if (a.necesita_repaso !== b.necesita_repaso) return a.necesita_repaso ? -1 : 1;
++        return new Date(b.ultima_fecha) - new Date(a.ultima_fecha);
++      });
++
++    const totalIntentos = resultado.reduce((sum, t) => sum + t.intentos, 0);
++    const promedioGeneral = resultado.length
++      ? Math.round(resultado.reduce((sum, t) => sum + t.promedio_porcentaje, 0) / resultado.length)
++      : null;
++
++    res.json({
++      resumen: { temas_con_trivia: resultado.length, promedio_general: promedioGeneral, total_intentos: totalIntentos },
++      temas: resultado,
++    });
++  } catch (err) {
++    res.status(500).json({ error: err.message });
++  }
++});
++
+ module.exports = router;
+diff --git a/utils/trivia.js b/utils/trivia.js
+new file mode 100644
+index 0000000..731ed84
+--- /dev/null
++++ b/utils/trivia.js
+@@ -0,0 +1,58 @@
++/**
++ * Calificación server-side de trivia — compartida entre modo grupo
++ * (routes/grupos.js, liga pública g.html) y modo individual
++ * (routes/temas.js, tema.html). Antes vivía duplicada solo en grupos.js;
++ * se separó aquí al agregar el seguimiento de progreso individual
++ * (31-ago-2026) para no mantener dos copias de la misma lógica.
++ */
++
++// Misma normalización que usan g.html/tema.html en el navegador — tiene que
++// coincidir para que una respuesta correcta no se marque como incorrecta
++// solo por mayúsculas o espacios de más.
++function normalizarTexto(s) {
++  return (s || "").toString().trim().toLowerCase();
++}
++
++/**
++ * Recalcula "acerto" pregunta por pregunta usando el contenido REAL del
++ * tema guardado en la base de datos (contenido.trivia), no lo que haya
++ * mandado el cliente — así una respuesta manipulada desde las herramientas
++ * de desarrollador no puede aparecer como "correcta" en ningún reporte.
++ * Server siempre gana: pregunta, respuesta_correcta y acerto que salen de
++ * aquí sustituyen lo que mandó el cliente; solo "respuesta" (lo que la
++ * persona realmente contestó) es del cliente, porque eso no hay forma de
++ * conocerlo del lado del servidor.
++ */
++function verificarRespuestas(contenido, respuestasCliente) {
++  const triviaOriginal = Array.isArray(contenido?.trivia) ? contenido.trivia : [];
++
++  return respuestasCliente.map((r) => {
++    const original = Number.isInteger(r.indice) ? triviaOriginal[r.indice] : undefined;
++
++    // No pudimos ubicar la pregunta original (tema editado, índice raro,
++    // etc.) — guardamos lo que llegó pero sin confiar en su calificación.
++    if (!original) {
++      return {
++        pregunta: typeof r.pregunta === "string" ? r.pregunta : "",
++        respuesta: typeof r.respuesta === "string" ? r.respuesta : null,
++        respuesta_correcta: typeof r.respuesta_correcta === "string" ? r.respuesta_correcta : "",
++        acerto: null,
++      };
++    }
++
++    const esCerrada = Array.isArray(original.opciones) && original.opciones.length > 0;
++    const respuesta = typeof r.respuesta === "string" ? r.respuesta : null;
++    const acerto = esCerrada
++      ? !!respuesta && normalizarTexto(respuesta) === normalizarTexto(original.respuesta_correcta)
++      : null; // abierta: nunca se autocalifica, ni aquí ni en el navegador
++
++    return {
++      pregunta: original.pregunta || "",
++      respuesta,
++      respuesta_correcta: original.respuesta_correcta || "",
++      acerto,
++    };
++  });
++}
++
++module.exports = { normalizarTexto, verificarRespuestas };
+-- 
+2.43.0
+

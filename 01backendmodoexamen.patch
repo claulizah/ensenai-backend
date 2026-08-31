@@ -1,0 +1,621 @@
+From 5d0b5265cfac852a831c8e7f44f2ef6a38a00822 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 31 Aug 2026 05:35:22 +0000
+Subject: [PATCH] Agregar Modo Examen: contador mensual de simulacros aparte
+ del de temas, enfoque examen/estudio en combinar, y PDF sin respuestas para
+ el grupo
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- routes/temas.js: nueva resolverAccesoExamen(userId) — cuenta y limita
+  mis_temas con tipo='examen' contra limite_examenes_mes, sin tocar el
+  contador de temas normales (se filtra resolverAccesoIndividual y
+  GET /mi-plan por tipo='tema' para no mezclar los dos contadores).
+  POST /combinar acepta enfoque:"examen"|"estudio" y modo grupo admite
+  hasta 12 temas en modo examen (vs 6 en repaso normal). POST /pdf acepta
+  incluirRespuestas para generar el imprimible sin la hoja de respuestas.
+- agents/combinarTemas.js: enfoque "examen" arma un simulacro (resumen
+  mínimo, más ejercicios, trivia como simulador de 15-20 preguntas
+  mezclando los temas, repaso relámpago en material_extra) — enfoque
+  "estudio" (default) es el repaso de siempre, sin cambios.
+- utils/planes.js: obtenerPlanIndividual regresa limite_examenes_mes
+  (null=ilimitado) leído de platform_settings, aparte de limite_temas_mes.
+- agents/pdfTema.js: generarPdfTema admite { incluirRespuestas: false }
+  para omitir la "Hoja de respuestas" final — pensado para que un maestro
+  reparta un imprimible en blanco a su grupo.
+- db/schema_v28.sql: agrega mis_temas.tipo ('tema'|'examen', default
+  'tema' — no requiere migrar filas existentes) y los límites de examen
+  por plan en platform_settings. Correr manualmente en Supabase antes de
+  desplegar este código.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01YTMQPp7oT1rgTK5ddmWYuK
+---
+ agents/combinarTemas.js |  61 +++++++++++++-----
+ agents/pdfTema.js       | 137 ++++++++++++++++++++++------------------
+ db/schema_v28.sql       |  30 +++++++++
+ routes/temas.js         | 119 ++++++++++++++++++++++++++++------
+ utils/planes.js         |  14 +++-
+ 5 files changed, 263 insertions(+), 98 deletions(-)
+ create mode 100644 db/schema_v28.sql
+
+diff --git a/agents/combinarTemas.js b/agents/combinarTemas.js
+index 1f23788..08e037d 100644
+--- a/agents/combinarTemas.js
++++ b/agents/combinarTemas.js
+@@ -5,12 +5,23 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+ 
+ /**
+  * Genera un material de REPASO que combina varios temas ya generados (de
+- * `mis_temas` o `grupo_temas`) en un solo material para estudiar antes de
+- * un examen que junta varios temas — pedido de piloto: "juntar temas para
+- * poder estudiar exámenes y cosas así". Reutiliza el mismo formato de
+- * salida que agents/generateTema.js (resumen/actividad(es)/ejercicios/
+- * trivia/material_extra/respuestas) para que el frontend lo pueda mostrar
+- * y guardar exactamente igual que un tema generado normal.
++ * `mis_temas` o `grupo_temas`) en un solo material — pedido de piloto:
++ * "juntar temas para poder estudiar exámenes y cosas así". Reutiliza el
++ * mismo formato de salida que agents/generateTema.js (resumen/actividad(es)/
++ * ejercicios/trivia/material_extra/respuestas) para que el frontend lo
++ * pueda mostrar y guardar exactamente igual que un tema generado normal.
++ *
++ * `enfoque` (nuevo, "Modo Examen") decide qué tan expositivo o práctico
++ * sale el resultado:
++ *  - "estudio" (default): el repaso de siempre — resumen integrado normal,
++ *    cantidades parecidas a un tema normal. Sigue gastando el límite
++ *    mensual de TEMAS de siempre (ver resolverAccesoIndividual en
++ *    routes/temas.js) — sin cambios de comportamiento.
++ *  - "examen": resumen reducido al mínimo, muchos más ejercicios, y la
++ *    trivia se vuelve un SIMULADOR (más preguntas, pensadas para resolverse
++ *    contra reloj mezclando los temas). Gasta un contador MENSUAL APARTE
++ *    (limite_examenes_mes, ver utils/planes.js y schema_v28.sql) — no toca
++ *    el límite de temas normales.
+  */
+ 
+ function resumenTextoCorto(contenido) {
+@@ -22,7 +33,7 @@ function resumenTextoCorto(contenido) {
+   return partes.filter(Boolean).join(" — ").slice(0, 500);
+ }
+ 
+-function buildPromptCombinar(temasFuente, modo, instruccionesCorrectivas = "") {
++function buildPromptCombinar(temasFuente, modo, enfoque, instruccionesCorrectivas = "") {
+   const listaTemas = temasFuente
+     .map(
+       (t, i) =>
+@@ -42,12 +53,31 @@ function buildPromptCombinar(temasFuente, modo, instruccionesCorrectivas = "") {
+   const nivelPredominante = temasFuente.find((t) => t.nivel)?.nivel || "primaria_alta";
+   const nivelLabel = ETIQUETAS_NIVEL[nivelPredominante] || "Primaria alta";
+ 
++  const esExamen = enfoque === "examen";
++
+   const instruccionActividad =
+     modo === "grupo"
+-      ? "Este repaso es para un GRUPO con perfiles de aprendizaje mezclados — genera UNA actividad de repaso para CADA UNA de las 8 inteligencias (tabla completa)."
++      ? `Este repaso es para un GRUPO con perfiles de aprendizaje mezclados — genera UNA actividad ${
++          esExamen ? "breve de repaso cronometrado" : "de repaso"
++        } para CADA UNA de las 8 inteligencias (tabla completa).`
++      : esExamen
++      ? "Genera UNA sola actividad — breve, de repaso cronometrado, no una dinámica larga."
+       : "Genera UNA sola actividad de repaso que combine los temas de forma natural.";
+ 
+-  return `Vas a armar un material de REPASO PARA EXAMEN que junta varios temas que la persona ya estudió por separado. El objetivo es ayudarle a repasar todo junto antes de una evaluación que los incluye a todos, encontrando las conexiones entre ellos cuando existan (no solo pegar los temas uno tras otro).${bloqueCorreccion}
++  const proposito = esExamen
++    ? `Vas a armar un SIMULACRO DE EXAMEN que junta varios temas que la persona ya estudió por separado, para practicar contra reloj antes de una evaluación que los incluye a todos. Aquí lo que importa es PRACTICAR, no releer — nada de exposición larga.`
++    : `Vas a armar un material de REPASO PARA EXAMEN que junta varios temas que la persona ya estudió por separado. El objetivo es ayudarle a repasar todo junto antes de una evaluación que los incluye a todos, encontrando las conexiones entre ellos cuando existan (no solo pegar los temas uno tras otro).`;
++
++  const instruccionesEnfoque = esExamen
++    ? `- El resumen va MUY reducido — nada de secciones largas. Deja "secciones" vacío ([]) y usa solo "que_es" (2-3 líneas, el hilo conductor entre los temas) e "ideas_clave" (5 a 8 frases sueltas, una por cada cosa que no se puede olvidar el día del examen). Si hay una confusión típica entre los temas combinados, va en "ojo_aqui" — es más importante aquí que en un repaso normal.
++- Ejercicios: 10 a 15 si algún tema combinado es de práctica, 6 a 8 si todos son de comprensión — más que un repaso normal, porque la meta es practicar, no leer. Dificultad mezclada (no solo fáciles), y varios que solo se resuelven combinando más de un tema.
++- La trivia es un SIMULADOR: 15 a 20 preguntas que mezclan los temas entre sí, pensadas para resolverse una tras otra contra reloj — igual de cortas y directas que siempre, pero sin agrupar por tema (que no se note "aquí empiezan las de matemáticas").
++- "material_extra" debe incluir SIEMPRE un "repaso relámpago" (la chuleta rápida de 3-6 líneas que ya soporta el formato) con lo esencial de todos los temas — es lo primero que alguien relee minutos antes de entrar al examen.`
++    : `- El resumen debe ser un repaso INTEGRADO: qué comparten los temas, en qué se diferencian o pueden confundirse, y las ideas clave de cada uno — no un resumen nuevo de cero de cada tema por separado.
++- La trivia y los ejercicios deben MEZCLAR los temas (algunas preguntas que solo se pueden responder si se entendieron varios de los temas a la vez), no ser un bloque de preguntas por tema.
++- Usa 8 a 12 preguntas de trivia (más que un tema normal, porque cubre más terreno) y 6 a 10 ejercicios si algún tema de los combinados es de práctica.`;
++
++  return `${proposito}${bloqueCorreccion}
+ 
+ TEMAS A COMBINAR (nivel de referencia: ${nivelLabel}):
+ ${listaTemas}
+@@ -55,10 +85,8 @@ ${listaTemas}
+ ${instruccionActividad}
+ 
+ INSTRUCCIONES:
+-- El campo "tema" del resultado debe ser un título corto que junte los temas (ej. "Repaso: Fracciones y Números decimales"), no una lista con comas.
+-- El resumen debe ser un repaso INTEGRADO: qué comparten los temas, en qué se diferencian o pueden confundirse, y las ideas clave de cada uno — no un resumen nuevo de cero de cada tema por separado.
+-- La trivia y los ejercicios deben MEZCLAR los temas (algunas preguntas que solo se pueden responder si se entendieron varios de los temas a la vez), no ser un bloque de preguntas por tema.
+-- Usa 8 a 12 preguntas de trivia (más que un tema normal, porque cubre más terreno) y 6 a 10 ejercicios si algún tema de los combinados es de práctica.
++- El campo "tema" del resultado debe ser un título corto que junte los temas (ej. "${esExamen ? "Simulacro: Fracciones y Números decimales" : "Repaso: Fracciones y Números decimales"}"), no una lista con comas.
++${instruccionesEnfoque}
+ - Sigue exactamente el mismo formato JSON de salida que un material de tema normal.
+ 
+ FORMATO DE SALIDA — responde SOLO en JSON válido (sin bloque de código, sin texto antes o después), con esta forma exacta:
+@@ -114,12 +142,15 @@ async function intentarCombinar(prompt) {
+ /**
+  * @param {Array<{tema:string, nivel:string|null, contenido:object}>} temasFuente - 2 a 6 temas ya generados
+  * @param {"individual"|"grupo"} modo
++ * @param {"estudio"|"examen"} [enfoque] - "estudio" (default, repaso de siempre)
++ * o "examen" (Modo Examen: menos resumen, más ejercicios, trivia como simulador).
+  * @param {string} [instruccionesCorrectivas] - notas de una ronda anterior de
+  * utils/revisorCalidad.js (ver routes/temas.js), para pedir una regeneración
+  * corregida en vez de repetir el mismo resultado.
+  */
+-async function combinarTemas(temasFuente, modo = "individual", instruccionesCorrectivas = "") {
+-  const prompt = buildPromptCombinar(temasFuente, modo, instruccionesCorrectivas);
++async function combinarTemas(temasFuente, modo = "individual", enfoque = "estudio", instruccionesCorrectivas = "") {
++  const enfoqueFinal = enfoque === "examen" ? "examen" : "estudio";
++  const prompt = buildPromptCombinar(temasFuente, modo, enfoqueFinal, instruccionesCorrectivas);
+ 
+   try {
+     return await intentarCombinar(prompt);
+diff --git a/agents/pdfTema.js b/agents/pdfTema.js
+index f2220bf..0062335 100644
+--- a/agents/pdfTema.js
++++ b/agents/pdfTema.js
+@@ -125,11 +125,22 @@ function normalizarResumen(resumen) {
+  * (mismo patrón que agents/pdf.js: para que el papá/mamá/maestro revise
+  * sin que el estudiante la vea mientras resuelve).
+  *
++ * `incluirRespuestas` (nuevo, para compartir con grupo/Modo Examen): cuando
++ * es `false`, se omite por completo la "Hoja de respuestas" final — pensado
++ * para que un maestro pueda generar un imprimible "en blanco" para repartir
++ * al grupo, y otro "con respuestas" para su propio uso, del mismo material.
++ * Todo lo demás del documento (portada, actividad, ejercicios, trivia sin
++ * resolver, material extra) es idéntico en ambos casos.
++ *
+  * @param {object} contenido - el JSON que regresa generarMaterialTema()
+  * @param {"individual"|"grupo"} modo
++ * @param {object} [opciones]
++ * @param {boolean} [opciones.incluirRespuestas=true] - si es false, no se
++ * agrega la página final de "Hoja de respuestas".
+  * @returns {Promise<string>} ruta local del PDF generado (temporal)
+  */
+-function generarPdfTema(contenidoOriginal, modo = "individual") {
++function generarPdfTema(contenidoOriginal, modo = "individual", opciones = {}) {
++  const incluirRespuestas = opciones.incluirRespuestas !== false;
+   // Se limpia una sola vez, al entrar: de aquí para abajo todo el texto ya
+   // es seguro de imprimir con la fuente del PDF (ver limpiarTexto arriba).
+   const contenido = limpiarContenido(contenidoOriginal);
+@@ -456,69 +467,73 @@ function generarPdfTema(contenidoOriginal, modo = "individual") {
+     }
+ 
+     // --- Hoja de respuestas, en una página nueva y al final ---
+-    const r = contenido.respuestas || {};
+-    doc.addPage();
+-    doc.rect(0, 0, doc.page.width, 56).fill(BOSQUE);
+-    doc.fillColor("#FFFFFF").fontSize(17).font("Helvetica-Bold").text("Hoja de respuestas", doc.page.margins.left, 18);
+-    doc.y = 76;
+-    doc
+-      .fillColor(GRIS)
+-      .fontSize(9.5)
+-      .font("Helvetica-Oblique")
+-      .text("Para el papá, la mamá, o el profesional — revisa aquí sin que el estudiante la vea mientras resuelve.");
+-    salto(1);
+-
+-    if (r.trivia_resuelta?.length) {
+-      tituloSeccion("Trivia resuelta");
+-      r.trivia_resuelta.forEach((rt) => {
+-        doc
+-          .fillColor(TEXTO)
+-          .fontSize(10.5)
+-          .font("Helvetica-Bold")
+-          .text(`${rt.pregunta} `, doc.page.margins.left, doc.y, { continued: true, width: contentWidth() })
+-          .font("Helvetica")
+-          .fillColor(BOSQUE)
+-          .text(`— ${rt.respuesta}`);
+-        salto(0.2);
+-      });
+-      salto(0.6);
+-    }
++    // Se omite por completo cuando incluirRespuestas es false (imprimible
++    // "en blanco" para repartir, ver docstring de generarPdfTema arriba).
++    if (incluirRespuestas) {
++      const r = contenido.respuestas || {};
++      doc.addPage();
++      doc.rect(0, 0, doc.page.width, 56).fill(BOSQUE);
++      doc.fillColor("#FFFFFF").fontSize(17).font("Helvetica-Bold").text("Hoja de respuestas", doc.page.margins.left, 18);
++      doc.y = 76;
++      doc
++        .fillColor(GRIS)
++        .fontSize(9.5)
++        .font("Helvetica-Oblique")
++        .text("Para el papá, la mamá, o el profesional — revisa aquí sin que el estudiante la vea mientras resuelve.");
++      salto(1);
+ 
+-    if (ejercicios.length) {
+-      tituloSeccion("Soluciones de los ejercicios", AZUL_PROFUNDO);
+-      ejercicios.forEach((e, i) => {
+-        asegurarEspacio(60);
+-        doc
+-          .fillColor(TEXTO)
+-          .fontSize(10.5)
+-          .font("Helvetica-Bold")
+-          .text(`${i + 1}. ${e.enunciado || ""}`, { width: contentWidth(), lineGap: 2 });
+-        (e.pasos || []).forEach((p) => {
+-          doc.fillColor("#4A6A85").fontSize(10).font("Helvetica").text(`    ${p}`, { width: contentWidth(), lineGap: 2 });
++      if (r.trivia_resuelta?.length) {
++        tituloSeccion("Trivia resuelta");
++        r.trivia_resuelta.forEach((rt) => {
++          doc
++            .fillColor(TEXTO)
++            .fontSize(10.5)
++            .font("Helvetica-Bold")
++            .text(`${rt.pregunta} `, doc.page.margins.left, doc.y, { continued: true, width: contentWidth() })
++            .font("Helvetica")
++            .fillColor(BOSQUE)
++            .text(`— ${rt.respuesta}`);
++          salto(0.2);
+         });
+-        if (e.respuesta) {
+-          doc.fillColor(BOSQUE).fontSize(10.5).font("Helvetica-Bold").text(`    Respuesta: ${e.respuesta}`);
+-        }
+-        salto(0.45);
+-      });
+-      salto(0.5);
+-    }
+-
+-    if (r.solucion_actividad) {
+-      tituloSeccion("Solución de la actividad");
+-      doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(r.solucion_actividad, { lineGap: 3 });
+-      salto(0.8);
+-    }
+-
+-    if (r.conceptos_clave?.length) {
+-      tituloSeccion("Conceptos clave");
+-      r.conceptos_clave.forEach((k) => doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(`•  ${k}`));
+-      salto(0.8);
+-    }
++        salto(0.6);
++      }
+ 
+-    if (r.autoevaluacion) {
+-      tituloSeccion("Autoevaluación");
+-      doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(r.autoevaluacion, { lineGap: 3 });
++      if (ejercicios.length) {
++        tituloSeccion("Soluciones de los ejercicios", AZUL_PROFUNDO);
++        ejercicios.forEach((e, i) => {
++          asegurarEspacio(60);
++          doc
++            .fillColor(TEXTO)
++            .fontSize(10.5)
++            .font("Helvetica-Bold")
++            .text(`${i + 1}. ${e.enunciado || ""}`, { width: contentWidth(), lineGap: 2 });
++          (e.pasos || []).forEach((p) => {
++            doc.fillColor("#4A6A85").fontSize(10).font("Helvetica").text(`    ${p}`, { width: contentWidth(), lineGap: 2 });
++          });
++          if (e.respuesta) {
++            doc.fillColor(BOSQUE).fontSize(10.5).font("Helvetica-Bold").text(`    Respuesta: ${e.respuesta}`);
++          }
++          salto(0.45);
++        });
++        salto(0.5);
++      }
++
++      if (r.solucion_actividad) {
++        tituloSeccion("Solución de la actividad");
++        doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(r.solucion_actividad, { lineGap: 3 });
++        salto(0.8);
++      }
++
++      if (r.conceptos_clave?.length) {
++        tituloSeccion("Conceptos clave");
++        r.conceptos_clave.forEach((k) => doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(`•  ${k}`));
++        salto(0.8);
++      }
++
++      if (r.autoevaluacion) {
++        tituloSeccion("Autoevaluación");
++        doc.fillColor(TEXTO).fontSize(10.5).font("Helvetica").text(r.autoevaluacion, { lineGap: 3 });
++      }
+     }
+ 
+     doc.end();
+diff --git a/db/schema_v28.sql b/db/schema_v28.sql
+new file mode 100644
+index 0000000..313180c
+--- /dev/null
++++ b/db/schema_v28.sql
+@@ -0,0 +1,30 @@
++-- Esquema EnseñAI v28 — correr en el SQL Editor de Supabase (después de v1-v27)
++-- "Modo Examen": un tipo de material aparte, pensado para repasar antes de
++-- un examen (más ejercicios y un simulador de trivia, menos resumen) que
++-- combina varios temas ya guardados — ver agents/combinarTemas.js.
++--
++-- A diferencia de un repaso normal (combinar en modo "estudio", que sigue
++-- gastando un tema del límite mensual de siempre, sin cambios), un
++-- simulacro de examen tiene SU PROPIO contador mensual — "un número de
++-- exámenes" que trae cada plan, como pidió Claudia — separado del contador
++-- de temas normales. Ilimitado no necesita columna de límite de exámenes:
++-- igual que con los temas, null/sin política = sin límite (ver
++-- utils/planes.js, que ya hardcodea ese caso para temas y ahora también
++-- para exámenes).
++
++-- ── mis_temas: distingue un tema normal de un simulacro de examen ───────
++-- 'tema' es el default para no afectar ninguna fila ni código existente —
++-- solo POST /api/temas/combinar con enfoque:"examen" escribe 'examen' aquí.
++alter table mis_temas
++  add column if not exists tipo text not null default 'tema' check (tipo in ('tema', 'examen'));
++
++create index if not exists mis_temas_user_id_tipo_idx on mis_temas(user_id, tipo);
++
++-- ── Planes: cuántos simulacros de examen trae cada nivel individual ─────
++alter table platform_settings
++  add column if not exists plan_gratis_limite_examenes int not null default 0,
++  add column if not exists plan_individual_aprendemos_limite_examenes int not null default 2;
++
++-- Ilimitado: sin columna a propósito (mismo patrón que
++-- plan_individual_ilimitado_limite_temas, que tampoco existe — "sin límite"
++-- vive como null hardcodeado en utils/planes.js, no en esta tabla).
+diff --git a/routes/temas.js b/routes/temas.js
+index d7e420e..3f4e0f8 100644
+--- a/routes/temas.js
++++ b/routes/temas.js
+@@ -27,7 +27,9 @@ function edadNumericaAproximada(nivel) {
+  * Decide si el usuario puede generar un tema individual más este mes,
+  * según su plan (Gratis/Aprendemos/Ilimitado — ver utils/planes.js y
+  * db/schema_v22.sql). No aplica a modo "grupo" (ese tiene su propio cobro
+- * vía grupo_temas/checkout, ver routes/grupos.js).
++ * vía grupo_temas/checkout, ver routes/grupos.js). No cuenta los simulacros
++ * de "Modo Examen" (tipo="examen", ver resolverAccesoExamen) — son un
++ * contador aparte desde schema_v28.
+  *
+  * Regresa { permitido: true, origen } si puede generar, o
+  * { permitido: false, error } con un mensaje listo para regresar al usuario.
+@@ -43,6 +45,7 @@ async function resolverAccesoIndividual(userId) {
+     .from("mis_temas")
+     .select("id", { count: "exact", head: true })
+     .eq("user_id", userId)
++    .eq("tipo", "tema")
+     .gte("created_at", inicioDeMes().toISOString());
+   if (countError) throw new Error(countError.message);
+ 
+@@ -59,6 +62,47 @@ async function resolverAccesoIndividual(userId) {
+   };
+ }
+ 
++/**
++ * Igual que resolverAccesoIndividual, pero para "Modo Examen"
++ * (mis_temas.tipo="examen", schema_v28) — un contador mensual APARTE del
++ * de temas normales, con su propio límite por plan (limite_examenes_mes,
++ * ver utils/planes.js). No aplica a modo "grupo": ahí un examen de maestro
++ * sigue el mismo mecanismo de "agregar a la liga" que ya cobra los temas
++ * de grupo (routes/grupos.js), sin un contador de exámenes separado por
++ * ahora.
++ */
++async function resolverAccesoExamen(userId) {
++  const plan = await obtenerPlanIndividual(userId);
++
++  if (plan.limite_examenes_mes === null) {
++    return { permitido: true, origen: plan.nivel }; // ilimitado
++  }
++
++  if (plan.limite_examenes_mes === 0) {
++    return {
++      permitido: false,
++      error: "Modo Examen no está incluido en tu plan Gratis. Mejora tu plan para armar simulacros de examen (Esencial: 2 al mes, o Ilimitado sin límite).",
++    };
++  }
++
++  const { count, error: countError } = await supabase
++    .from("mis_temas")
++    .select("id", { count: "exact", head: true })
++    .eq("user_id", userId)
++    .eq("tipo", "examen")
++    .gte("created_at", inicioDeMes().toISOString());
++  if (countError) throw new Error(countError.message);
++
++  if ((count || 0) < plan.limite_examenes_mes) {
++    return { permitido: true, origen: plan.nivel };
++  }
++
++  return {
++    permitido: false,
++    error: `Ya usaste tus ${plan.limite_examenes_mes} simulacros de examen de este mes. Cambia a Ilimitado para armar simulacros sin límite.`,
++  };
++}
++
+ /**
+  * POST /api/temas/generar
+  * body: { tema, nivel, modo?, perfilId? }
+@@ -184,14 +228,27 @@ router.get("/mi-plan", requireBuyer, async (req, res) => {
+   if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
+   try {
+     const plan = await obtenerPlanIndividual(req.user.id);
++    const inicioMes = inicioDeMes().toISOString();
++
+     const { count, error: countError } = await supabase
+       .from("mis_temas")
+       .select("id", { count: "exact", head: true })
+       .eq("user_id", req.user.id)
+-      .gte("created_at", inicioDeMes().toISOString());
++      .eq("tipo", "tema")
++      .gte("created_at", inicioMes);
+     if (countError) throw new Error(countError.message);
+ 
+-    res.json({ ...plan, usados_este_mes: count || 0 });
++    // Contador aparte de "Modo Examen" (schema_v28) — mismo mes, mismo
++    // usuario, pero nunca se mezcla con usados_este_mes.
++    const { count: countExamenes, error: countExamenesError } = await supabase
++      .from("mis_temas")
++      .select("id", { count: "exact", head: true })
++      .eq("user_id", req.user.id)
++      .eq("tipo", "examen")
++      .gte("created_at", inicioMes);
++    if (countExamenesError) throw new Error(countExamenesError.message);
++
++    res.json({ ...plan, usados_este_mes: count || 0, usados_examenes_este_mes: countExamenes || 0 });
+   } catch (err) {
+     res.status(500).json({ error: err.message });
+   }
+@@ -297,7 +354,7 @@ router.patch("/mios/:id", requireBuyer, async (req, res) => {
+ router.post("/pdf", requireBuyer, async (req, res) => {
+   let pdfLocalPath;
+   try {
+-    const { contenido, modo, temaId } = req.body;
++    const { contenido, modo, temaId, incluirRespuestas } = req.body;
+     if (!contenido || typeof contenido !== "object") {
+       return res.status(400).json({ error: "Falta contenido (el JSON que regresó POST /api/temas/generar)." });
+     }
+@@ -305,8 +362,12 @@ router.post("/pdf", requireBuyer, async (req, res) => {
+       return res.status(500).json({ error: "Supabase no está configurado — no se puede subir el PDF." });
+     }
+     const modoFinal = modo === "grupo" ? "grupo" : "individual";
++    // Por default sí incluye la hoja de respuestas — un maestro puede pedir
++    // incluirRespuestas:false para armar el imprimible "en blanco" que
++    // reparte al grupo (ver docstring de generarPdfTema en agents/pdfTema.js).
++    const incluirRespuestasFinal = incluirRespuestas !== false;
+ 
+-    pdfLocalPath = await generarPdfTema(contenido, modoFinal);
++    pdfLocalPath = await generarPdfTema(contenido, modoFinal, { incluirRespuestas: incluirRespuestasFinal });
+     const pdfBuffer = fs.readFileSync(pdfLocalPath);
+     const storagePath = `${req.user.id}/tema-${Date.now()}.pdf`;
+ 
+@@ -331,35 +392,51 @@ router.post("/pdf", requireBuyer, async (req, res) => {
+ 
+ const MIN_TEMAS_COMBINAR = 2;
+ const MAX_TEMAS_COMBINAR = 6;
++// Modo Examen admite más temas de golpe (ej. "todo Matemáticas del primer
++// parcial" fácil pasa de 6) — el simulador se vuelve largo pero no
++// impráctico hasta unos 12.
++const MAX_TEMAS_COMBINAR_EXAMEN = 12;
+ 
+ /**
+  * POST /api/temas/combinar
+- * body: { temaIds: string[], modo?: "individual"|"grupo" }
+- * Junta entre 2 y 6 temas ya generados en un solo material de repaso —
+- * pedido de piloto: "juntar temas para poder estudiar exámenes". Ver
+- * agents/combinarTemas.js para el prompt.
++ * body: { temaIds: string[], modo?: "individual"|"grupo", enfoque?: "estudio"|"examen" }
++ * Junta varios temas ya generados en un solo material — pedido de piloto:
++ * "juntar temas para poder estudiar exámenes". Ver agents/combinarTemas.js
++ * para el prompt.
++ *
++ * `enfoque` (default "estudio") decide la FORMA del contenido, ortogonal a
++ * `modo` (que decide de DÓNDE salen los temas y quién es dueño):
++ *  - "estudio": el repaso de siempre, resumen integrado normal.
++ *  - "examen" ("Modo Examen"): resumen mínimo, muchos más ejercicios, la
++ *    trivia se vuelve un simulador — ver agents/combinarTemas.js.
+  *
+  * modo "individual" (default): los temaIds son ids de `mis_temas` del
+- * usuario autenticado. Consume un tema del límite mensual igual que
+- * /generar (mismo mecanismo: se guarda en `mis_temas`, así que cuenta
+- * la próxima vez que se calcule el uso del mes) y el resultado se guarda
+- * en el historial para poder volver a verlo.
++ * usuario autenticado.
++ *  - enfoque "estudio": consume un tema del límite mensual de siempre
++ *    (resolverAccesoIndividual) — sin cambios de comportamiento.
++ *  - enfoque "examen": consume del contador APARTE de simulacros
++ *    (resolverAccesoExamen, schema_v28) y se guarda con tipo="examen".
++ * En ambos casos se guarda en `mis_temas` para poder volver a verlo.
+  *
+  * modo "grupo": los temaIds son ids de `grupo_temas` de un grupo del
+  * profesional autenticado (se verifica dueño vía `grupos.profesional_id`,
+  * y que ninguno esté en pago_status "pendiente"). Igual que /generar en
+  * modo grupo, aquí NO se guarda — el frontend hace un paso separado
+  * (POST /api/grupos/:id/temas) si decide agregarlo a la liga, que es
+- * donde ya vive el cobro de grupo.
++ * donde ya vive el cobro de grupo (enfoque "examen" en modo grupo no tiene
++ * gate propio todavía: la guía de examen del maestro se cobra igual que
++ * cualquier tema de grupo).
+  */
+ router.post("/combinar", requireBuyer, async (req, res) => {
+   if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
+   try {
+-    const { temaIds, modo } = req.body;
++    const { temaIds, modo, enfoque } = req.body;
+     const modoFinal = modo === "grupo" ? "grupo" : "individual";
++    const enfoqueFinal = enfoque === "examen" ? "examen" : "estudio";
++    const tope = enfoqueFinal === "examen" ? MAX_TEMAS_COMBINAR_EXAMEN : MAX_TEMAS_COMBINAR;
+ 
+-    if (!Array.isArray(temaIds) || temaIds.length < MIN_TEMAS_COMBINAR || temaIds.length > MAX_TEMAS_COMBINAR) {
+-      return res.status(400).json({ error: `Selecciona entre ${MIN_TEMAS_COMBINAR} y ${MAX_TEMAS_COMBINAR} temas para combinar.` });
++    if (!Array.isArray(temaIds) || temaIds.length < MIN_TEMAS_COMBINAR || temaIds.length > tope) {
++      return res.status(400).json({ error: `Selecciona entre ${MIN_TEMAS_COMBINAR} y ${tope} temas para combinar.` });
+     }
+ 
+     let temasFuente;
+@@ -384,7 +461,7 @@ router.post("/combinar", requireBuyer, async (req, res) => {
+ 
+       temasFuente = filas.map((f) => ({ tema: f.titulo, nivel: null, contenido: f.contenido }));
+     } else {
+-      acceso = await resolverAccesoIndividual(req.user.id);
++      acceso = enfoqueFinal === "examen" ? await resolverAccesoExamen(req.user.id) : await resolverAccesoIndividual(req.user.id);
+       if (!acceso.permitido) return res.status(402).json({ error: acceso.error });
+ 
+       const { data: filas, error: filasError } = await supabase
+@@ -408,7 +485,8 @@ router.post("/combinar", requireBuyer, async (req, res) => {
+     // el resultado tiene exactamente la misma forma ("material_tema"), así
+     // que se valida igual: estructura, nivel de lectura y una revisión
+     // barata con IA, con hasta 2 intentos.
+-    const generarFn = (temaOriginal, instruccionesCorrectivas) => combinarTemas(temasFuente, modoFinal, instruccionesCorrectivas);
++    const generarFn = (temaOriginal, instruccionesCorrectivas) =>
++      combinarTemas(temasFuente, modoFinal, enfoqueFinal, instruccionesCorrectivas);
+     const { material: contenido, calidad } = await verificarYCorregir(
+       askClaude,
+       generarFn,
+@@ -428,6 +506,7 @@ router.post("/combinar", requireBuyer, async (req, res) => {
+           nivel: nivelPredominante,
+           perfil_usado: null,
+           contenido,
++          tipo: enfoqueFinal === "examen" ? "examen" : "tema",
+           origen: acceso.origen,
+           etiquetas: [],
+         })
+@@ -439,7 +518,7 @@ router.post("/combinar", requireBuyer, async (req, res) => {
+       // no quede en su historial
+     }
+ 
+-    res.json({ status: "tema_combinado", modo: modoFinal, tema_id: temaId, contenido, calidad });
++    res.json({ status: "tema_combinado", modo: modoFinal, enfoque: enfoqueFinal, tema_id: temaId, contenido, calidad });
+   } catch (err) {
+     res.status(500).json({ error: err.message });
+   }
+diff --git a/utils/planes.js b/utils/planes.js
+index e5cb25d..0b098dd 100644
+--- a/utils/planes.js
++++ b/utils/planes.js
+@@ -29,8 +29,15 @@ async function obtenerSettings() {
+ 
+ /**
+  * Plan individual activo del usuario (papás/adolescentes/adultos).
+- * Regresa { nivel, precio_mxn, limite_temas_mes, limite_perfiles }.
+- * limite_temas_mes = null significa ilimitado.
++ * Regresa { nivel, precio_mxn, limite_temas_mes, limite_perfiles,
++ * limite_examenes_mes }. limite_temas_mes/limite_examenes_mes = null
++ * significa ilimitado.
++ *
++ * limite_examenes_mes (schema_v28) es un contador APARTE del de temas —
++ * "Modo Examen" (combinar con enfoque:"examen", ver agents/combinarTemas.js
++ * y POST /api/temas/combinar) gasta de este límite, no del de temas
++ * normales. Un repaso combinado en enfoque:"estudio" (el de siempre) sigue
++ * gastando limite_temas_mes, sin cambios.
+  */
+ async function obtenerPlanIndividual(userId) {
+   const settings = await obtenerSettings();
+@@ -49,6 +56,7 @@ async function obtenerPlanIndividual(userId) {
+       precio_mxn: settings.plan_individual_ilimitado_precio_mxn,
+       limite_temas_mes: null,
+       limite_perfiles: settings.plan_individual_ilimitado_limite_perfiles,
++      limite_examenes_mes: null,
+     };
+   }
+   if (sus?.nivel === "aprendemos") {
+@@ -57,6 +65,7 @@ async function obtenerPlanIndividual(userId) {
+       precio_mxn: settings.plan_individual_aprendemos_precio_mxn,
+       limite_temas_mes: settings.plan_individual_aprendemos_limite_temas,
+       limite_perfiles: settings.plan_individual_aprendemos_limite_perfiles,
++      limite_examenes_mes: settings.plan_individual_aprendemos_limite_examenes,
+     };
+   }
+   return {
+@@ -64,6 +73,7 @@ async function obtenerPlanIndividual(userId) {
+     precio_mxn: 0,
+     limite_temas_mes: settings.plan_gratis_limite_temas_individual,
+     limite_perfiles: settings.plan_gratis_limite_perfiles,
++    limite_examenes_mes: settings.plan_gratis_limite_examenes,
+   };
+ }
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,159 @@
+From c44d8947ec8455fb60758ab58f13d5942c83a60f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 31 Aug 2026 16:54:01 +0000
+Subject: [PATCH] =?UTF-8?q?Agregar=20enfoque=20psicoeducativo=20a=20genera?=
+ =?UTF-8?q?ci=C3=B3n=20de=20temas=20(contenido=20para=20terapia/consulta?=
+ =?UTF-8?q?=20en=20vez=20de=20material=20escolar)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Pedido de seguimiento tras Modo Examen y gamificación: primer feature
+concreto para psicólogos en la liga de grupo. POST /api/temas/generar
+ahora acepta enfoque: "psicoeducativo" (default "escolar", sin cambios).
+Mismo JSON de salida — la actividad y los "ejercicios" pasan a ser
+estrategias de afrontamiento/práctica para casa en vez de dinámicas
+escolares (ver agents/generateTema.js). No consume un contador aparte
+ni requiere cambios de esquema.
+---
+ agents/generateTema.js | 34 ++++++++++++++++++++++++++++++----
+ routes/temas.js        | 20 ++++++++++++++++++--
+ 2 files changed, 48 insertions(+), 6 deletions(-)
+
+diff --git a/agents/generateTema.js b/agents/generateTema.js
+index a428c2a..0f89710 100644
+--- a/agents/generateTema.js
++++ b/agents/generateTema.js
+@@ -104,19 +104,43 @@ const TECNICAS_POR_NIVEL = {
+  * la liga de grupo de maestros/psicólogos — un salón tiene perfiles
+  * mezclados, así que se genera UNA actividad por cada una de las 8
+  * inteligencias (tabla completa), no solo la(s) dominante(s) de una persona.
++ * @param {"escolar"|"psicoeducativo"} enfoque - "escolar" (default): material
++ * tipo clase, con ejercicios de práctica académica. "psicoeducativo": mismo
++ * JSON de salida, pero la actividad y los "ejercicios" dejan de ser
++ * dinámicas/tareas escolares y pasan a ser estrategias de afrontamiento,
++ * regulación emocional o práctica para casa — pensado para uso en terapia,
++ * orientación o consulta psicológica (ver liga de grupo para psicólogos).
+  */
+-function buildPrompt(tema, nivel, perfilDominante, modo = "individual", detalles = "", tieneImagenes = false) {
++function buildPrompt(tema, nivel, perfilDominante, modo = "individual", detalles = "", tieneImagenes = false, enfoque = "escolar") {
+   const nivelLabel = ETIQUETAS_NIVEL[nivel] || "Primaria alta";
+   const edadLabel = EDAD_APROX[nivel] || "9-12";
++  const esPsicoeducativo = enfoque === "psicoeducativo";
+ 
+   const tiposAUsar = modo === "grupo" ? TIPOS_TODOS : perfilDominante && perfilDominante.length ? perfilDominante : ["linguistica"];
+   const inteligenciasLabel = tiposAUsar.map((t) => ETIQUETAS_INTELIGENCIA[t] || t).join(", ");
+ 
+-  const instruccionActividad =
+-    modo === "grupo"
++  const instruccionActividad = esPsicoeducativo
++    ? modo === "grupo"
++      ? `Este material es para un GRUPO de pacientes/consultantes con perfiles mezclados — genera UNA actividad para CADA UNA de las 8 inteligencias (tabla completa), pero cada una debe ser una forma distinta de trabajar el tema desde lo emocional (afrontamiento, regulación, reflexión), no una dinámica escolar.`
++      : `Adapta TODO el contenido a la edad e inteligencia(s) indicadas. La actividad debe ser UNA estrategia de afrontamiento, regulación emocional o práctica para casa relacionada con el tema — no una dinámica de tipo escolar. Si se indican varias inteligencias, combina sus técnicas de manera natural en esa única actividad.`
++    : modo === "grupo"
+       ? `Este material es para un GRUPO (salón de clase o grupo de pacientes) con perfiles de aprendizaje mezclados — genera UNA actividad para CADA UNA de las 8 inteligencias (tabla completa), no elijas solo una o dos. Así el profesional puede repartir la actividad adecuada según cada estudiante.`
+       : `Adapta TODO el contenido a la edad, grupo escolar, e inteligencia(s) predominante(s) indicadas. Si se indican varias inteligencias, combina sus técnicas de manera natural en UNA sola actividad (no generes una tabla de las 8).`;
+ 
++  const bloqueEnfoquePsicoeducativo = esPsicoeducativo
++    ? `
++
++ENFOQUE: APOYO PSICOEDUCATIVO (esto NO es material escolar)
++Este material se usa en un contexto de acompañamiento psicológico o emocional (terapia, orientación, consulta), no en un salón de clase. Ajusta TODO el material a ese contexto, incluyendo el JSON de salida más abajo (los mismos campos, pero con este contenido):
++- Tono cálido, validante y sin juzgar — nunca en tono de examen o evaluación académica. Evita palabras como "calificación", "error" o "incorrecto"; usa "vamos a explorar otra forma de verlo" en su lugar.
++- No diagnostiques ni asumas que un ejemplo describe la vida real de quien lo usa. Plantea las situaciones como hipotéticas o generales ("imagina que...", "a veces pasa que...", "algunas personas sienten...").
++- Sección 2 (actividad): en vez de una dinámica escolar, es UNA estrategia concreta de afrontamiento, regulación emocional o comunicación relacionada con el tema, para practicar en casa o entre sesiones.
++- Sección 2B ("ejercicios" en el JSON): usa los mismos campos (\`enunciado\`, \`pista\`, \`pasos\`, \`respuesta\`) pero con contenido práctico, no académico — por ejemplo un registro de pensamientos/emociones, una práctica guiada paso a paso de una técnica (respiración, reestructuración cognitiva, comunicación asertiva) o un ejercicio para hacer en familia. \`pasos\` es el procedimiento concreto a seguir; \`respuesta\` es la reflexión o el resultado esperado, no "la solución correcta".
++- Trivia y repaso: preguntas para recordar y aplicar lo trabajado en la sesión (evocación activa), nunca con formato ni tono de examen.
++- Material extra: recursos para practicar en casa (tarjetas con frases de afrontamiento, registro de emociones, etc.), no material de estudio escolar.
++- Si el tema no es de contexto escolar, usa "la persona" o "quien participa" en vez de "el estudiante" o "el alumno" en el material.`
++    : "";
++
+   const tecnicasNivel = TECNICAS_POR_NIVEL[nivel];
+   const bloqueTecnicasNivel = tecnicasNivel
+     ? `\n\nReferencia de qué tan concretas deben ser las técnicas para esta edad (${nivelLabel}, ${edadLabel} años) — adapta la IDEA al tema, no copies el ejemplo literal:\n${tecnicasNivel.map((t) => `- ${t}`).join("\n")}`
+@@ -153,6 +177,7 @@ REGLA PRINCIPAL
+ Adapta TODO el contenido a la edad y grupo escolar indicados.
+ No uses vocabulario, actividades ni preguntas de un nivel superior al correspondiente.
+ ${instruccionActividad}
++${bloqueEnfoquePsicoeducativo}
+ 
+ IMPORTANTE:
+ Las inteligencias representan diferentes formas de acercarse y practicar el contenido, no "estilos fijos" de aprendizaje.
+@@ -517,7 +542,8 @@ async function askClaude(systemPrompt, mensajeUsuario, maxTokens = 1000) {
+ async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individual", opciones = {}) {
+   const detalles = String(opciones.detalles || "").trim().slice(0, 1500);
+   const bloquesImagen = normalizarImagenes(opciones.imagenes);
+-  const prompt = buildPrompt(tema, nivel, perfilDominante, modo, detalles, bloquesImagen.length > 0);
++  const enfoque = opciones.enfoque === "psicoeducativo" ? "psicoeducativo" : "escolar";
++  const prompt = buildPrompt(tema, nivel, perfilDominante, modo, detalles, bloquesImagen.length > 0, enfoque);
+ 
+   try {
+     return await intentarGenerar(prompt, bloquesImagen);
+diff --git a/routes/temas.js b/routes/temas.js
+index cea5d60..4329898 100644
+--- a/routes/temas.js
++++ b/routes/temas.js
+@@ -141,7 +141,7 @@ async function resolverAccesoExamen(userId) {
+ 
+ /**
+  * POST /api/temas/generar
+- * body: { tema, nivel, modo?, perfilId? }
++ * body: { tema, nivel, modo?, perfilId?, enfoque? }
+  * modo "individual" (default): usa el perfil indicado en `perfilId` (uno
+  * de los que regresa GET /api/aprendizaje/perfiles) para su inteligencia
+  * dominante — si no se manda o no existe, usa un perfil balanceado por
+@@ -150,6 +150,13 @@ async function resolverAccesoExamen(userId) {
+  * genera una tabla con UNA actividad por cada una de las 8 inteligencias,
+  * porque un salón/grupo tiene perfiles mezclados. Ignora perfilId.
+  *
++ * `enfoque` (default "escolar"): "psicoeducativo" cambia la FORMA del
++ * contenido (ver agents/generateTema.js) para uso en terapia/consulta —
++ * la actividad y los "ejercicios" pasan a ser estrategias de afrontamiento
++ * y práctica para casa en vez de dinámicas escolares. No cambia el límite
++ * que se consume ni el JSON de salida, así que no requiere cambios en el
++ * frontend para poder verse — es opcional pedirlo.
++ *
+  * En modo individual, el tema se guarda automáticamente en `mis_temas`
+  * (historial personal — ver GET /mios) para que se pueda volver a ver o
+  * reimprimir sin gastar de nuevo. En modo grupo NO se guarda aquí — para
+@@ -171,13 +178,20 @@ function normalizarEtiquetas(valor) {
+ 
+ router.post("/generar", requireBuyer, async (req, res) => {
+   try {
+-    const { tema, nivel, modo, perfilId, etiquetas, detalles, imagenes } = req.body;
++    const { tema, nivel, modo, perfilId, etiquetas, detalles, imagenes, enfoque } = req.body;
+     if (!tema) return res.status(400).json({ error: "Falta tema." });
+     const nivelesValidos = ["preescolar", "primaria_baja", "primaria_alta", "secundaria", "preparatoria", "universidad"];
+     if (!nivelesValidos.includes(nivel)) {
+       return res.status(400).json({ error: `nivel debe ser uno de: ${nivelesValidos.join(", ")}.` });
+     }
+     const modoFinal = modo === "grupo" ? "grupo" : "individual";
++    // "psicoeducativo" (pensado para la liga de grupo de psicólogos, pero
++    // disponible también en modo individual) cambia la FORMA del contenido
++    // — actividad y "ejercicios" pasan a ser estrategias de afrontamiento y
++    // práctica para casa en vez de dinámicas/tareas escolares — pero no
++    // cambia el límite mensual que consume ni el JSON de salida (ver
++    // agents/generateTema.js). Default "escolar" = comportamiento de siempre.
++    const enfoqueFinal = enfoque === "psicoeducativo" ? "psicoeducativo" : "escolar";
+ 
+     let perfilDominante = ["linguistica"]; // default balanceado si no se indica perfil (ignorado en modo grupo)
+     if (modoFinal === "individual" && supabase && perfilId) {
+@@ -217,6 +231,7 @@ router.post("/generar", requireBuyer, async (req, res) => {
+       generarMaterialTema(temaOriginal, nivel, perfilDominante, modoFinal, {
+         detalles: instruccionesCorrectivas ? `${detalles || ""} ${instruccionesCorrectivas}`.trim() : detalles,
+         imagenes,
++        enfoque: enfoqueFinal,
+       });
+ 
+     const { material: contenido, calidad } = await verificarYCorregir(
+@@ -266,6 +281,7 @@ router.post("/generar", requireBuyer, async (req, res) => {
+     res.json({
+       status: "tema_generado",
+       modo: modoFinal,
++      enfoque: enfoqueFinal,
+       perfil_usado: modoFinal === "individual" ? perfilDominante : null,
+       tema_id: temaId,
+       origen,
+-- 
+2.43.0
+
