@@ -65,7 +65,7 @@ function buildPromptCombinar(temasFuente, modo, enfoque, instruccionesCorrectiva
     modo === "grupo"
       ? esExamen
         ? `Este es un simulador puro — deja "actividades" como un arreglo de 1 elemento con "inteligencia": "todas" y "titulo"/"instrucciones" vacíos ("") (nada de dinámicas aquí, solo práctica).`
-        : `Este repaso es para un GRUPO con perfiles de aprendizaje mezclados — genera UNA actividad de repaso para CADA UNA de las 8 inteligencias (tabla completa).`
+        : `Este repaso es para un GRUPO con perfiles de aprendizaje mezclados — genera UNA SOLA actividad de repaso que le funcione a todo el grupo (que se pueda hacer hablando, escribiendo, dibujando o con movimiento), con "inteligencia": "todas". No generes la tabla de las 8.`
       : esExamen
       ? `Este es un simulador puro — deja "actividad" con "titulo" y "instrucciones" vacíos ("") (nada de dinámicas aquí, solo práctica).`
       : "Genera UNA sola actividad de repaso que combine los temas de forma natural.";
@@ -75,7 +75,7 @@ function buildPromptCombinar(temasFuente, modo, enfoque, instruccionesCorrectiva
     : `Vas a armar un material de REPASO PARA EXAMEN que junta varios temas que la persona ya estudió por separado. El objetivo es ayudarle a repasar todo junto antes de una evaluación que los incluye a todos, encontrando las conexiones entre ellos cuando existan (no solo pegar los temas uno tras otro).`;
 
   const instruccionesEnfoque = esExamen
-    ? `- Deja "resumen" completamente vacío: "que_es":"", "secciones":[], "pasos":[], "ideas_clave":[], "ojo_aqui":"", "truco":"". Deja "diagrama" con "tipo":"ninguno". Deja "material_extra" vacío ([]) — nada de flashcards/memorama/repaso relámpago aquí, esto es solo simulacro de práctica, no material para repasar antes.
+    ? `- Deja "resumen" completamente vacío: "que_es":"", "secciones":[], "pasos":[], "ideas_clave":[], "ojo_aqui":"", "truco":"". Deja "esquema_visual" vacío (""). Deja "diagrama" con "tipo":"ninguno". Deja "material_extra" vacío ([]) — nada de flashcards/memorama/repaso relámpago aquí, esto es solo simulacro de práctica, no material para repasar antes.
 - Decide TÚ, según la naturaleza de los temas combinados, qué combinación de "ejercicios" y "trivia" sirve más para practicar:
   - Si los temas son de práctica/procedimiento (matemáticas, química, gramática con pasos): prioriza "ejercicios" (10 a 15), y deja "trivia" vacía ([]) si no aporta nada aquí.
   - Si los temas son de comprensión/memorización (historia, biología conceptual, literatura, geografía): prioriza "trivia" como SIMULADOR (15 a 20 preguntas, pensadas para resolverse una tras otra contra reloj, mezclando los temas entre sí sin que se note "aquí empiezan las de historia"), y deja "ejercicios" vacío ([]) si no aplica.

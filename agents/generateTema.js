@@ -180,7 +180,7 @@ PERFIL DEL ESTUDIANTE
 - Grupo escolar: ${nivelLabel}
 - Edad aproximada: ${edadLabel}
 - Inteligencia(s) a considerar: ${inteligenciasLabel}
-- Modo: ${modo === "grupo" ? "grupo (tabla de las 8 inteligencias)" : "individual (perfil dominante de una persona)"}
+- Modo: ${modo === "grupo" ? "grupo (perfiles mezclados: UNA actividad que le sirva a todo el grupo)" : "individual (perfil dominante de una persona)"}
 
 REGLA PRINCIPAL
 Adapta TODO el contenido a la edad y grupo escolar indicados.
@@ -256,7 +256,7 @@ Representa el esquema con texto claro y fácil de visualizar (usa indentación/g
 
 ${
   modo === "grupo"
-    ? "Genera UNA actividad concreta por cada una de las 8 inteligencias (tabla completa), siguiendo estos tipos de técnica para cada una:"
+    ? "Genera UNA SOLA actividad concreta que le funcione a todo el grupo: que la misma se pueda resolver de varias de estas formas a la vez (hablando, escribiendo, dibujando o con movimiento), para que cada quien le entre por donde se le acomode. Usa estos tipos de técnica como menú de referencia, NO generes una por cada uno:"
     : "Crea UNA actividad relacionada directamente con el tema, combinando de forma natural la(s) inteligencia(s) indicada(s), usando estos tipos de técnica como referencia:"
 }
 - Lingüística: mini cuento, explicar con palabras propias, completar frases, crear preguntas, relacionar conceptos.

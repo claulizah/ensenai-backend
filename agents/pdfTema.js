@@ -23,6 +23,9 @@ const ETIQUETAS_INTELIGENCIA = {
   interpersonal: "Interpersonal",
   intrapersonal: "Intrapersonal",
   naturalista: "Naturalista",
+  // Actividad única para todo el grupo (31-ago-2026): sin esta llave el PDF
+  // imprimía la píldora con el texto literal "TODAS".
+  todas: "Para todo el grupo",
 };
 
 const LETRAS = ["A", "B", "C", "D", "E", "F"];
@@ -273,10 +276,15 @@ function generarPdfTema(contenidoOriginal, modo = "individual", opciones = {}) {
     }
 
     // --- Actividad(es) ---
-    const actividades = contenido.actividades || (contenido.actividad ? [contenido.actividad] : []);
+    // Solo cuentan las actividades con texto: en Modo Examen vienen vacías a
+    // propósito y antes se imprimía una página entera en blanco titulada
+    // "Actividad" (31-ago-2026).
+    const conTexto = (a) => !!a && (String(a.titulo || "").trim() || String(a.instrucciones || "").trim());
+    const actividades = (contenido.actividades || (contenido.actividad ? [contenido.actividad] : [])).filter(conTexto);
+    const variasPorInteligencia = actividades.filter((a) => a.inteligencia && a.inteligencia !== "todas").length > 1;
     if (actividades.length) {
       doc.addPage();
-      tituloSeccion(modo === "grupo" ? "Actividades — una por cada tipo de inteligencia" : "Actividad", AZUL_PROFUNDO);
+      tituloSeccion(modo === "grupo" && variasPorInteligencia ? "Actividades — una por cada tipo de inteligencia" : "Actividad", AZUL_PROFUNDO);
       salto(0.2);
       actividades.forEach((a) => {
         const x = doc.page.margins.left;
