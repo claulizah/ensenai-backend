@@ -177,7 +177,7 @@ router.get("/mios", requireBuyer, async (req, res) => {
 
 /**
  * POST /api/grupos/:id/temas
- * body: { titulo, contenido, esPrimerTemaGratis?, pdfUrl? }
+ * body: { titulo, contenido, pdfUrl? }
  * Agrega un tema ya generado (ver prompt de generación, pieza aparte) a la
  * liga del grupo. El primer tema de un grupo puede marcarse como
  * "gratis_prueba" (piloto). Los siguientes se cubren automáticamente
@@ -193,7 +193,7 @@ router.get("/mios", requireBuyer, async (req, res) => {
 router.post("/:id/temas", requireBuyer, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
-    const { titulo, contenido, esPrimerTemaGratis, pdfUrl } = req.body;
+    const { titulo, contenido, pdfUrl } = req.body;
     if (!titulo || !contenido) return res.status(400).json({ error: "Faltan titulo y/o contenido." });
 
     const { data: grupo, error: grupoError } = await supabase
@@ -212,7 +212,12 @@ router.post("/:id/temas", requireBuyer, async (req, res) => {
       .eq("grupo_id", grupo.id);
 
     let pagoStatus;
-    if (esPrimerTemaGratis || count === 0) {
+    // Antes bastaba con que el cliente mandara esPrimerTemaGratis:true para
+    // que el tema quedara gratis, sin verificar nada: cualquiera podía
+    // activar todos sus temas saltándose el plan y Stripe. Ahora lo decide
+    // el servidor con el conteo real; la bandera del cliente solo puede
+    // pedirlo, nunca imponerlo (31-ago-2026).
+    if (count === 0) {
       pagoStatus = "gratis_prueba";
     } else {
       // ¿el profesional tiene un plan de grupo activo? si es Ilimitado, el
@@ -289,8 +294,18 @@ router.post("/temas/:temaId/actividades", requireBuyer, async (req, res) => {
       return res.json({ status: "ya_estaban", actividades: actuales });
     }
 
-    const nivel = typeof req.body.nivel === "string" ? req.body.nivel : "primaria_alta";
-    const enfoque = req.body.enfoque === "psicoeducativo" ? "psicoeducativo" : "escolar";
+    // El nivel/enfoque REAL del tema se guarda dentro del contenido al
+    // crearlo (grupo_temas no tiene esas columnas). Se prefiere ese valor
+    // sobre lo que mande el cliente: el <select> del formulario se
+    // reinicia al re-renderizar la pantalla y mandaba "primaria_baja",
+    // así que las 8 actividades salían escritas para 6-8 años sobre temas
+    // de secundaria (31-ago-2026).
+    const nivel =
+      (typeof contenido.nivel === "string" && contenido.nivel) ||
+      (typeof req.body.nivel === "string" && req.body.nivel) ||
+      "primaria_alta";
+    const enfoque =
+      contenido.enfoque === "psicoeducativo" || req.body.enfoque === "psicoeducativo" ? "psicoeducativo" : "escolar";
     const ocho = await generarActividadesPorInteligencia(contenido, nivel, enfoque);
 
     // La genérica ("todas") se conserva al principio: sigue siendo la que

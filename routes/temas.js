@@ -696,7 +696,10 @@ router.post("/combinar", requireBuyer, async (req, res) => {
         return res.status(400).json({ error: "Uno de los temas seleccionados todavía no está pagado/activo." });
       }
 
-      temasFuente = filas.map((f) => ({ tema: f.titulo, nivel: null, contenido: f.contenido }));
+      // nivel: grupo_temas no lo guarda como columna, pero desde el 31-ago
+      // viaja dentro del contenido. Sin esto, toda guía de examen de grupo
+      // se redactaba y validaba para 9-12 años.
+      temasFuente = filas.map((f) => ({ tema: f.titulo, nivel: f.contenido?.nivel || null, contenido: f.contenido }));
     } else {
       acceso = enfoqueFinal === "examen" ? await resolverAccesoExamen(req.user.id) : await resolverAccesoIndividual(req.user);
       if (!acceso.permitido) return res.status(402).json({ error: acceso.error });
@@ -737,6 +740,20 @@ router.post("/combinar", requireBuyer, async (req, res) => {
       2,
       { onProblemaDetectado: (problemas, intento) => console.warn(`[QA temas/combinar] intento ${intento}:`, problemas) }
     );
+
+    // Modo Examen = simulador puro. El prompt ya lo pide, pero el modelo a
+    // veces llena igual "esquema_visual" o la actividad, y entonces al
+    // usuario le aparece una pestaña "Estudiar" con un esquema suelto o un
+    // recuadro de actividad en blanco (31-ago-2026). Aquí se garantiza el
+    // contrato pase lo que pase, en vez de confiar en la redacción.
+    if (enfoqueFinal === "examen") {
+      contenido.resumen = { que_es: "", secciones: [], pasos: [], ideas_clave: [], ojo_aqui: "", truco: "" };
+      contenido.esquema_visual = "";
+      contenido.diagrama = null;
+      contenido.material_extra = [];
+      if (modoFinal === "grupo") contenido.actividades = [];
+      else contenido.actividad = null;
+    }
 
     let temaId = null;
     let gamificacion = null;
