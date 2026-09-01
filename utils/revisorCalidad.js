@@ -109,23 +109,30 @@ function validarEstructuraMaterialTema(material, modo, enfoque = 'estudio') {
   // --- Actividad(es), según modo ---
   if (!esExamen) {
     if (modo === 'grupo') {
+      // Desde el 31-ago-2026 un tema de grupo nace con UNA actividad para
+      // todo el grupo ("inteligencia": "todas"); las 8 de la tabla de
+      // Gardner se piden aparte (POST /api/grupos/temas/:id/actividades).
+      // Así que aquí valen las dos formas: 1 genérica, o la genérica más
+      // las 8 ya adaptadas.
       const actividades = material.actividades || [];
-      if (actividades.length !== 8) {
-        problemas.push(`En modo grupo se esperan 8 actividades (una por inteligencia) y llegaron ${actividades.length}.`);
+      if (actividades.length === 0) {
+        problemas.push('En modo grupo falta la actividad para el grupo.');
       }
-      const inteligenciasVistas = new Set();
+      const porInteligencia = actividades.filter((a) => a && a.inteligencia !== 'todas');
       actividades.forEach((a, i) => {
         if (!a.titulo || !a.instrucciones) {
           problemas.push(`Actividad ${i + 1}: falta título o instrucciones.`);
         }
-        if (!INTELIGENCIAS_VALIDAS.includes(a.inteligencia)) {
+        if (a.inteligencia !== 'todas' && !INTELIGENCIAS_VALIDAS.includes(a.inteligencia)) {
           problemas.push(`Actividad ${i + 1}: "${a.inteligencia}" no es una inteligencia válida.`);
-        } else {
-          inteligenciasVistas.add(a.inteligencia);
         }
       });
-      if (inteligenciasVistas.size < INTELIGENCIAS_VALIDAS.length && actividades.length === 8) {
-        problemas.push('Las 8 actividades no cubren las 8 inteligencias (hay repetidas).');
+      // Si vienen adaptadas por inteligencia, entonces sí deben ser las 8 sin repetir.
+      if (porInteligencia.length > 0) {
+        const vistas = new Set(porInteligencia.map((a) => a.inteligencia));
+        if (porInteligencia.length !== 8 || vistas.size !== INTELIGENCIAS_VALIDAS.length) {
+          problemas.push(`Las actividades por inteligencia deben ser 8 sin repetir; llegaron ${porInteligencia.length} (${vistas.size} distintas).`);
+        }
       }
     } else {
       const actividad = material.actividad;
@@ -274,6 +281,15 @@ Revisa específicamente:
 5. Que los CONCEPTOS (no solo el vocabulario) sean apropiados para la edad —
    por ejemplo, una palabra corta como "ADN" puede estar bien escrita pero
    ser un concepto demasiado avanzado para un niño de 5 años
+
+REGLA DE UMBRAL (importante): reporta SOLO lo que confundiría o enseñaría mal
+a un estudiante de esa edad. Cada problema que reportes obliga a regenerar
+todo el material desde cero, así que un reporte de más le cuesta al usuario
+un minuto de espera. NO reportes: diferencias de estilo o presentación,
+formato de una respuesta (0.5 vs 1/2), falta de precisión técnica que a esa
+edad no se exige (constantes de integración, dominios, casos borde), ni
+sugerencias de "quedaría mejor si…". Si el material es correcto para la edad
+aunque no sea perfecto para un especialista, responde OK.
 
 Si NO encuentras ningún problema, responde exactamente: OK
 
