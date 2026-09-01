@@ -11,6 +11,7 @@ const temasRouter = require("./routes/temas");
 const referidosRouter = require("./routes/referidos");
 const { stripeWebhookHandler } = require("./routes/stripeWebhook");
 const { inboundEmailWebhookHandler } = require("./routes/inboundEmail");
+const { iniciarBarridoZombis } = require("./utils/trabajos");
 
 const app = express();
 
@@ -72,4 +73,10 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`EnseñAI backend corriendo en http://localhost:${PORT}`);
+  // Las generaciones en segundo plano (POST /api/temas/generar-async) se
+  // atienden dentro de este proceso. Si el servidor se reinicia a media
+  // generación, el trabajo queda "generando" para siempre y el celular se
+  // queda preguntando sin respuesta — este barrido los cierra con un
+  // mensaje que manda a revisar el historial (ver utils/trabajos.js).
+  iniciarBarridoZombis();
 });
