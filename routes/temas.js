@@ -11,6 +11,7 @@ const { registrarActividad, obtenerEstadoGamificacion, armarTriviaDiaria } = req
 const { obtenerOCrearCodigo, obtenerBono, consumirBono } = require("../utils/referidos");
 const { verificarRespuestas } = require("../utils/trivia");
 const supabase = require("../db/supabase");
+const trabajos = require("../utils/trabajos");
 
 const router = express.Router();
 
@@ -177,123 +178,292 @@ function normalizarEtiquetas(valor) {
   return [...new Set(limpias)].slice(0, 10); // hasta 10 etiquetas por tema, suficiente para materia/parcial/etc.
 }
 
-router.post("/generar", requireBuyer, async (req, res) => {
-  try {
-    const { tema, nivel, modo, perfilId, etiquetas, detalles, imagenes, enfoque } = req.body;
-    if (!tema) return res.status(400).json({ error: "Falta tema." });
-    const nivelesValidos = ["preescolar", "primaria_baja", "primaria_alta", "secundaria", "preparatoria", "universidad"];
-    if (!nivelesValidos.includes(nivel)) {
-      return res.status(400).json({ error: `nivel debe ser uno de: ${nivelesValidos.join(", ")}.` });
-    }
-    const modoFinal = modo === "grupo" ? "grupo" : "individual";
+/**
+ * Error de generación con código HTTP propio. Existe porque la misma
+ * lógica corre en dos lugares: dentro de la petición (POST /generar) y
+ * fuera de ella, en un trabajo de segundo plano (POST /generar-async).
+ * En el segundo caso ya no hay un `res` a la mano cuando algo falla, así
+ * que el código viaja en el error y quien lo atrapa decide qué hacer.
+ */
+class ErrorGeneracion extends Error {
+  constructor(status, mensaje) {
+    super(mensaje);
+    this.name = "ErrorGeneracion";
+    this.status = status;
+  }
+}
+
+const NIVELES_VALIDOS = ["preescolar", "primaria_baja", "primaria_alta", "secundaria", "preparatoria", "universidad"];
+
+/**
+ * Lo que se puede revisar barato y de inmediato: que venga el tema y que
+ * el nivel sea uno de los conocidos. Se corre ANTES de encolar un trabajo
+ * para que un error de captura se conteste al instante y no después de
+ * un minuto de espera.
+ */
+function validarPeticionTema(cuerpo) {
+  const { tema, nivel, modo, perfilId, etiquetas, detalles, enfoque } = cuerpo || {};
+  if (!tema || !String(tema).trim()) throw new ErrorGeneracion(400, "Falta tema.");
+  if (!NIVELES_VALIDOS.includes(nivel)) {
+    throw new ErrorGeneracion(400, `nivel debe ser uno de: ${NIVELES_VALIDOS.join(", ")}.`);
+  }
+  return {
+    tema: String(tema).trim(),
+    nivel,
     // "psicoeducativo" (pensado para la liga de grupo de psicólogos, pero
     // disponible también en modo individual) cambia la FORMA del contenido
     // — actividad y "ejercicios" pasan a ser estrategias de afrontamiento y
     // práctica para casa en vez de dinámicas/tareas escolares — pero no
     // cambia el límite mensual que consume ni el JSON de salida (ver
     // agents/generateTema.js). Default "escolar" = comportamiento de siempre.
-    const enfoqueFinal = enfoque === "psicoeducativo" ? "psicoeducativo" : "escolar";
+    enfoque: enfoque === "psicoeducativo" ? "psicoeducativo" : "escolar",
+    modo: modo === "grupo" ? "grupo" : "individual",
+    perfilId: perfilId || null,
+    etiquetas: normalizarEtiquetas(etiquetas),
+    detalles: detalles ? String(detalles) : "",
+  };
+}
 
-    let perfilDominante = ["linguistica"]; // default balanceado si no se indica perfil (ignorado en modo grupo)
-    if (modoFinal === "individual" && supabase && perfilId) {
-      const { data: perfil } = await supabase
-        .from("perfiles_aprendizaje")
-        .select("inteligencia_dominante")
-        .eq("id", perfilId)
-        .eq("user_id", req.user.id)
-        .maybeSingle();
-      if (perfil?.inteligencia_dominante?.length) {
-        perfilDominante = perfil.inteligencia_dominante;
+/**
+ * El trabajo de verdad: resuelve el perfil, cobra el límite del plan,
+ * genera el material y lo guarda. Regresa exactamente el mismo objeto que
+ * POST /api/temas/generar devolvía antes, para que ni el frontend viejo
+ * ni el nuevo tengan que interpretar dos formas distintas.
+ *
+ * `imagenes` va aparte de `params` porque en el camino asíncrono no viaja
+ * por la base de datos (pesa megas en base64, ver utils/trabajos.js).
+ */
+async function ejecutarGeneracionTema(user, params, imagenes) {
+  const { tema, nivel, enfoque: enfoqueFinal, modo: modoFinal, perfilId, etiquetas, detalles } = params;
+
+  let perfilDominante = ["linguistica"]; // default balanceado si no se indica perfil (ignorado en modo grupo)
+  if (modoFinal === "individual" && supabase && perfilId) {
+    const { data: perfil } = await supabase
+      .from("perfiles_aprendizaje")
+      .select("inteligencia_dominante")
+      .eq("id", perfilId)
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (perfil?.inteligencia_dominante?.length) {
+      perfilDominante = perfil.inteligencia_dominante;
+    }
+  }
+
+  // El límite de generaciones/mes (Gratis/Aprendemos/Ilimitado) solo
+  // aplica al modo individual. El modo grupo se cobra aparte, por
+  // tema-grupo o suscripción de grupo, al agregarlo a la liga (ver
+  // routes/grupos.js).
+  let origen = null;
+  let accesoUsoBono = false;
+  if (modoFinal === "individual" && supabase) {
+    const acceso = await resolverAccesoIndividual(user);
+    if (!acceso.permitido) throw new ErrorGeneracion(402, acceso.error);
+    origen = acceso.origen;
+    accesoUsoBono = !!acceso.usaBono;
+  }
+
+  // `detalles` (nota escrita) e `imagenes` (fotos de un resumen/apuntes)
+  // son opcionales — orientan la generación sin limitarla. Ver
+  // agents/generateTema.js, que valida y descarta imágenes mal formadas.
+  // La llamada real va envuelta en verificarYCorregir (utils/revisorCalidad.js):
+  // valida estructura y nivel de lectura gratis, y si eso pasa limpio hace
+  // una revisión barata con IA — si algo falla, regenera con instrucciones
+  // correctivas hasta 2 intentos en total. Si se agotan los intentos, se
+  // entrega igual (no se bloquea al usuario) pero sin el sello de verificado.
+  const generarFn = (temaOriginal, instruccionesCorrectivas) =>
+    generarMaterialTema(temaOriginal, nivel, perfilDominante, modoFinal, {
+      detalles: instruccionesCorrectivas ? `${detalles || ""} ${instruccionesCorrectivas}`.trim() : detalles,
+      imagenes,
+      enfoque: enfoqueFinal,
+    });
+
+  const { material: contenido, calidad } = await verificarYCorregir(
+    askClaude,
+    generarFn,
+    tema,
+    { tipo: "material_tema", modo: modoFinal, edadObjetivo: edadNumericaAproximada(nivel) },
+    2,
+    { onProblemaDetectado: (problemas, intento) => console.warn(`[QA temas/generar] intento ${intento}:`, problemas) }
+  );
+
+  let temaId = null;
+  let gamificacion = null;
+  if (modoFinal === "individual" && supabase) {
+    const etiquetasFinal = normalizarEtiquetas(etiquetas);
+    const { data: guardado, error: guardarError } = await supabase
+      .from("mis_temas")
+      .insert({ user_id: user.id, tema, nivel, perfil_usado: perfilDominante, contenido, origen, etiquetas: etiquetasFinal })
+      .select("id")
+      .single();
+    if (!guardarError) {
+      temaId = guardado.id;
+      // La racha/medallas (utils/gamificacion.js) son el "gancho para
+      // volver" del piloto — si esto falla no debe tumbar la respuesta,
+      // el usuario ya generó su material.
+      try {
+        gamificacion = await registrarActividad(user.id, { contarTemas: true, etiquetaUsada: etiquetasFinal.length > 0 });
+      } catch (errGam) {
+        console.warn("[gamificación] no se pudo registrar actividad:", errGam.message);
+      }
+      // El crédito de referido (utils/referidos.js) solo se cobra si la
+      // generación de verdad se guardó — igual que el límite mensual
+      // normal, que tampoco se descuenta si algo falla a medias.
+      if (accesoUsoBono) {
+        try {
+          await consumirBono(user.id);
+        } catch (errBono) {
+          console.warn("[referidos] no se pudo descontar el bono:", errBono.message);
+        }
       }
     }
+    // si falla el guardado no bloqueamos la respuesta — el usuario ya
+    // gastó el tema generado y debe poder verlo aunque no quede en su
+    // historial
+  }
 
-    // El límite de generaciones/mes (Gratis/Aprendemos/Ilimitado) solo
-    // aplica al modo individual. El modo grupo se cobra aparte, por
-    // tema-grupo o suscripción de grupo, al agregarlo a la liga (ver
-    // routes/grupos.js).
-    let origen = null;
-    let accesoUsoBono = false;
-    if (modoFinal === "individual" && supabase) {
+  return {
+    status: "tema_generado",
+    modo: modoFinal,
+    enfoque: enfoqueFinal,
+    perfil_usado: modoFinal === "individual" ? perfilDominante : null,
+    tema_id: temaId,
+    origen,
+    contenido,
+    calidad,
+    gamificacion,
+  };
+}
+
+router.post("/generar", requireBuyer, async (req, res) => {
+  try {
+    const params = validarPeticionTema(req.body);
+    const payload = await ejecutarGeneracionTema(req.user, params, req.body.imagenes);
+    res.json(payload);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/temas/generar-async
+ * Mismo cuerpo que /generar, más un `claveCliente` opcional (un id que
+ * inventa el frontend por intento, para idempotencia).
+ *
+ * Encola la generación y contesta 202 en menos de un segundo con
+ * { trabajo_id }. El material se genera aparte y se recoge con
+ * GET /api/temas/trabajos/:id.
+ *
+ * Por qué existe: /generar deja la petición HTTP abierta 40-90 segundos.
+ * En celular, bloquear la pantalla o cambiarse de app suspende la pestaña
+ * y mata esa conexión — el tema se generaba y se guardaba, pero el usuario
+ * veía un error y creía haber perdido su cupo del mes (reporte sep-2026).
+ * /generar se mantiene tal cual para no romper páginas ya cacheadas.
+ */
+router.post("/generar-async", requireBuyer, async (req, res) => {
+  try {
+    if (!supabase) throw new ErrorGeneracion(500, "Supabase no está configurado.");
+    const params = validarPeticionTema(req.body);
+    const claveCliente = req.body.claveCliente ? String(req.body.claveCliente).slice(0, 100) : null;
+
+    // Reintento de la MISMA petición (red intermitente, doble tap): se
+    // devuelve el trabajo que ya existe en vez de encolar —y cobrar— otro.
+    const yaExiste = await trabajos.buscarPorClave(req.user.id, claveCliente);
+    if (yaExiste) return res.status(202).json({ trabajo_id: yaExiste.id, estado: yaExiste.estado });
+
+    // Una sola generación a la vez por usuario: dos en paralelo gastarían
+    // cupo doble y la segunda pisaría la pantalla de espera de la primera.
+    const enCurso = await trabajos.trabajoSinTerminar(req.user.id);
+    if (enCurso) {
+      return res.status(409).json({
+        error: `Ya estás generando "${enCurso.titulo}". Espera a que termine.`,
+        trabajo_id: enCurso.id,
+        estado: enCurso.estado,
+      });
+    }
+
+    // El límite del plan se revisa ANTES de encolar para que un 402 llegue
+    // al instante y no después de un minuto de espera. Se vuelve a revisar
+    // dentro de la generación (es una lectura, no cobra nada dos veces).
+    if (params.modo === "individual") {
       const acceso = await resolverAccesoIndividual(req.user);
       if (!acceso.permitido) return res.status(402).json({ error: acceso.error });
-      origen = acceso.origen;
-      accesoUsoBono = !!acceso.usaBono;
     }
 
-    // `detalles` (nota escrita) e `imagenes` (fotos de un resumen/apuntes)
-    // son opcionales — orientan la generación sin limitarla. Ver
-    // agents/generateTema.js, que valida y descarta imágenes mal formadas.
-    // La llamada real va envuelta en verificarYCorregir (utils/revisorCalidad.js):
-    // valida estructura y nivel de lectura gratis, y si eso pasa limpio hace
-    // una revisión barata con IA — si algo falla, regenera con instrucciones
-    // correctivas hasta 2 intentos en total. Si se agotan los intentos, se
-    // entrega igual (no se bloquea al usuario) pero sin el sello de verificado.
-    const generarFn = (temaOriginal, instruccionesCorrectivas) =>
-      generarMaterialTema(temaOriginal, nivel, perfilDominante, modoFinal, {
-        detalles: instruccionesCorrectivas ? `${detalles || ""} ${instruccionesCorrectivas}`.trim() : detalles,
-        imagenes,
-        enfoque: enfoqueFinal,
-      });
-
-    const { material: contenido, calidad } = await verificarYCorregir(
-      askClaude,
-      generarFn,
-      tema,
-      { tipo: "material_tema", modo: modoFinal, edadObjetivo: edadNumericaAproximada(nivel) },
-      2,
-      { onProblemaDetectado: (problemas, intento) => console.warn(`[QA temas/generar] intento ${intento}:`, problemas) }
-    );
-
-    let temaId = null;
-    let gamificacion = null;
-    if (modoFinal === "individual" && supabase) {
-      const etiquetasFinal = normalizarEtiquetas(etiquetas);
-      const { data: guardado, error: guardarError } = await supabase
-        .from("mis_temas")
-        .insert({ user_id: req.user.id, tema, nivel, perfil_usado: perfilDominante, contenido, origen, etiquetas: etiquetasFinal })
-        .select("id")
-        .single();
-      if (!guardarError) {
-        temaId = guardado.id;
-        // La racha/medallas (utils/gamificacion.js) son el "gancho para
-        // volver" del piloto — si esto falla no debe tumbar la respuesta,
-        // el usuario ya generó su material.
-        try {
-          gamificacion = await registrarActividad(req.user.id, { contarTemas: true, etiquetaUsada: etiquetasFinal.length > 0 });
-        } catch (errGam) {
-          console.warn("[gamificación] no se pudo registrar actividad:", errGam.message);
-        }
-        // El crédito de referido (utils/referidos.js) solo se cobra si la
-        // generación de verdad se guardó — igual que el límite mensual
-        // normal, que tampoco se descuenta si algo falla a medias.
-        if (accesoUsoBono) {
-          try {
-            await consumirBono(req.user.id);
-          } catch (errBono) {
-            console.warn("[referidos] no se pudo descontar el bono:", errBono.message);
-          }
-        }
-      }
-      // si falla el guardado no bloqueamos la respuesta — el usuario ya
-      // gastó el tema generado y debe poder verlo aunque no quede en su
-      // historial
-    }
-
-    res.json({
-      status: "tema_generado",
-      modo: modoFinal,
-      enfoque: enfoqueFinal,
-      perfil_usado: modoFinal === "individual" ? perfilDominante : null,
-      tema_id: temaId,
-      origen,
-      contenido,
-      calidad,
-      gamificacion,
+    const trabajo = await trabajos.crearTrabajo(req.user.id, {
+      modo: params.modo,
+      titulo: params.tema,
+      claveCliente,
+      parametros: params,
+      imagenes: Array.isArray(req.body.imagenes) ? req.body.imagenes : [],
     });
+
+    res.status(202).json({ trabajo_id: trabajo.id, estado: trabajo.estado });
+
+    // Fuera del ciclo de la petición a propósito: la respuesta ya salió.
+    // Si el usuario cierra la app, bloquea el celular o se le cae la red,
+    // esto sigue corriendo y el resultado queda esperándolo en la tabla.
+    setImmediate(async () => {
+      const usuario = req.user;
+      try {
+        await trabajos.marcarGenerando(trabajo.id);
+        const payload = await ejecutarGeneracionTema(usuario, params, trabajos.imagenesDe(trabajo.id));
+        await trabajos.marcarListo(trabajo.id, payload);
+      } catch (err) {
+        console.error(`[trabajos] ${trabajo.id} falló:`, err.message);
+        await trabajos.marcarFallido(trabajo.id, err.message || "No se pudo generar el material.");
+      }
+    });
+  } catch (err) {
+    if (!res.headersSent) res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/temas/trabajos/ultimo
+ * El trabajo más reciente de la última media hora. Es la red de seguridad
+ * para cuando el frontend pierde el id: si el POST alcanzó a encolar pero
+ * la respuesta nunca llegó al celular, con esto la app lo vuelve a
+ * encontrar al abrirse en vez de dejar el material huérfano.
+ * Se declara antes que /trabajos/:id para que "ultimo" no se lea como id.
+ */
+router.get("/trabajos/ultimo", requireBuyer, async (req, res) => {
+  try {
+    const trabajo = await trabajos.ultimoTrabajo(req.user.id);
+    if (!trabajo) return res.json({ trabajo: null });
+    res.json({ trabajo: aRespuestaTrabajo(trabajo) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+/**
+ * GET /api/temas/trabajos/:id
+ * Estado de una generación encolada. Mientras va en camino regresa
+ * { estado: "pendiente" | "generando" }; al terminar, `resultado` trae
+ * exactamente el mismo objeto que devolvía POST /api/temas/generar.
+ */
+router.get("/trabajos/:id", requireBuyer, async (req, res) => {
+  try {
+    const trabajo = await trabajos.obtenerTrabajo(req.user.id, req.params.id);
+    if (!trabajo) return res.status(404).json({ error: "No encontramos esa generación." });
+    res.json(aRespuestaTrabajo(trabajo));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Forma pública de un trabajo (sin los parámetros internos). */
+function aRespuestaTrabajo(trabajo) {
+  return {
+    trabajo_id: trabajo.id,
+    estado: trabajo.estado,
+    modo: trabajo.modo,
+    titulo: trabajo.titulo,
+    error: trabajo.error || null,
+    resultado: trabajo.estado === trabajos.ESTADOS.LISTO ? trabajo.resultado : null,
+    created_at: trabajo.created_at,
+  };
+}
 
 /**
  * GET /api/temas/mi-plan
