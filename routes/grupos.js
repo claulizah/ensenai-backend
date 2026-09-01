@@ -5,6 +5,7 @@ const { requireBuyer } = require("../middleware/auth");
 const { obtenerPlanGrupo, inicioDeMes } = require("../utils/planes");
 const { primerNombre } = require("../utils/nombre");
 const { verificarRespuestas } = require("../utils/trivia");
+const { generarActividadesPorInteligencia } = require("../agents/generateTema");
 const supabase = require("../db/supabase");
 
 const router = express.Router();
@@ -249,6 +250,62 @@ router.post("/:id/temas", requireBuyer, async (req, res) => {
     if (error) throw new Error(error.message);
 
     res.json({ status: "tema_agregado", tema: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/grupos/temas/:temaId/actividades
+ * body: { nivel?, enfoque? }
+ *
+ * "Adaptar por inteligencia" (31-ago-2026): genera las 8 actividades de la
+ * tabla de Gardner para un tema de grupo YA generado, y las guarda dentro de
+ * su contenido. Antes esas 8 salían en cada generación de grupo — era la
+ * parte más pesada del material y lo que hacía que el modo grupo se sintiera
+ * lento (o se cayera por tardanza). Ahora el tema nace con UNA actividad
+ * para todo el grupo y estas 8 se piden solo si el profesional las quiere.
+ *
+ * Es idempotente: si el tema ya tiene las 8, las regresa sin volver a
+ * gastar una llamada al modelo.
+ */
+router.post("/temas/:temaId/actividades", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { data: tema, error: temaError } = await supabase
+      .from("grupo_temas")
+      .select("id, contenido, grupos!inner(profesional_id)")
+      .eq("id", req.params.temaId)
+      .single();
+    if (temaError || !tema) return res.status(404).json({ error: "Tema no encontrado." });
+    if (tema.grupos?.profesional_id !== req.user.id) {
+      return res.status(403).json({ error: "Este tema no te pertenece." });
+    }
+
+    const contenido = tema.contenido || {};
+    const actuales = Array.isArray(contenido.actividades) ? contenido.actividades : [];
+    const porInteligencia = actuales.filter((a) => a && a.inteligencia && a.inteligencia !== "todas");
+    if (porInteligencia.length >= 8) {
+      return res.json({ status: "ya_estaban", actividades: actuales });
+    }
+
+    const nivel = typeof req.body.nivel === "string" ? req.body.nivel : "primaria_alta";
+    const enfoque = req.body.enfoque === "psicoeducativo" ? "psicoeducativo" : "escolar";
+    const ocho = await generarActividadesPorInteligencia(contenido, nivel, enfoque);
+
+    // La genérica ("todas") se conserva al principio: sigue siendo la que
+    // le sirve al grupo completo, las 8 son el detalle por si lo quiere.
+    const generica = actuales.filter((a) => a && a.inteligencia === "todas");
+    const actividades = [...generica, ...ocho];
+    const contenidoNuevo = { ...contenido, actividades };
+
+    const { error } = await supabase
+      .from("grupo_temas")
+      .update({ contenido: contenidoNuevo })
+      .eq("id", tema.id);
+    if (error) throw new Error(error.message);
+
+    res.json({ status: "actividades_generadas", actividades });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
