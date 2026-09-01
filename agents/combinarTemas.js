@@ -64,7 +64,7 @@ function buildPromptCombinar(temasFuente, modo, enfoque, instruccionesCorrectiva
   const instruccionActividad =
     modo === "grupo"
       ? esExamen
-        ? `Este es un simulador puro — deja "actividades" como un arreglo de 8 elementos con "instrucciones" vacío ("") en cada uno (nada de dinámicas aquí, solo práctica).`
+        ? `Este es un simulador puro — deja "actividades" como un arreglo de 1 elemento con "inteligencia": "todas" y "titulo"/"instrucciones" vacíos ("") (nada de dinámicas aquí, solo práctica).`
         : `Este repaso es para un GRUPO con perfiles de aprendizaje mezclados — genera UNA actividad de repaso para CADA UNA de las 8 inteligencias (tabla completa).`
       : esExamen
       ? `Este es un simulador puro — deja "actividad" con "titulo" y "instrucciones" vacíos ("") (nada de dinámicas aquí, solo práctica).`
@@ -106,13 +106,13 @@ ${
   "resumen": { "que_es": "...", "secciones": [ { "titulo": "...", "texto": "..." } ], "pasos": [], "ideas_clave": ["...", "..."], "ojo_aqui": "...", "truco": "..." },
   "esquema_visual": "...",
   "diagrama": { "tipo": "mapa_mental|linea_tiempo|comparativo|proceso|ciclo|jerarquia|partes|ninguno", "titulo": "...", "datos": {} },
-  "actividades": [ { "inteligencia": "linguistica|logico_matematica|espacial|musical|kinestesica|interpersonal|intrapersonal|naturalista", "titulo": "...", "instrucciones": "..." } ],
+  "actividades": [ { "inteligencia": "todas", "titulo": "...", "instrucciones": "..." } ],
   "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
   "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "..." } ],
   "respuestas": { "trivia_resuelta": [ { "pregunta": "...", "respuesta": "..." } ], "solucion_actividad": "...", "conceptos_clave": ["...", "..."], "autoevaluacion": "..." }
 }
-"actividades" debe traer exactamente 8 elementos, uno por cada inteligencia.`
+"actividades" debe traer EXACTAMENTE 1 elemento, con "inteligencia": "todas".`
     : `{
   "tema": "...",
   "es_de_practica": true,

@@ -102,8 +102,10 @@ const TECNICAS_POR_NIVEL = {
  * @param {"individual"|"grupo"} modo - "individual": una persona con su
  * perfil dominante ya calculado (1-2 inteligencias). "grupo": pensado para
  * la liga de grupo de maestros/psicólogos — un salón tiene perfiles
- * mezclados, así que se genera UNA actividad por cada una de las 8
- * inteligencias (tabla completa), no solo la(s) dominante(s) de una persona.
+ * mezclados, así que se genera UNA actividad diseñada para que le entre todo
+ * el grupo ("inteligencia": "todas"). Las 8 de la tabla de Gardner ya no se
+ * generan de entrada: se piden aparte con generarActividadesPorInteligencia()
+ * (31-ago-2026) para que la generación de grupo no cargue siempre con eso.
  * @param {"escolar"|"psicoeducativo"} enfoque - "escolar" (default): material
  * tipo clase, con ejercicios de práctica académica. "psicoeducativo": mismo
  * JSON de salida, pero la actividad y los "ejercicios" dejan de ser
@@ -119,12 +121,19 @@ function buildPrompt(tema, nivel, perfilDominante, modo = "individual", detalles
   const tiposAUsar = modo === "grupo" ? TIPOS_TODOS : perfilDominante && perfilDominante.length ? perfilDominante : ["linguistica"];
   const inteligenciasLabel = tiposAUsar.map((t) => ETIQUETAS_INTELIGENCIA[t] || t).join(", ");
 
+  // Modo grupo: UNA actividad "para todo el grupo" (31-ago-2026). Antes se
+  // generaban las 8 de la tabla de Gardner en cada generación — era lo más
+  // pesado que producía el sistema (y lo que hacía que el modo grupo se
+  // sintiera lento o se cayera por tardanza), y en la práctica el maestro
+  // termina usando una. Las 8 siguen existiendo, pero ahora bajo demanda:
+  // ver generarActividadesPorInteligencia() más abajo y el botón "Adaptar
+  // por inteligencia" en grupo.html.
   const instruccionActividad = esPsicoeducativo
     ? modo === "grupo"
-      ? `Este material es para un GRUPO de pacientes/consultantes con perfiles mezclados — genera UNA actividad para CADA UNA de las 8 inteligencias (tabla completa), pero cada una debe ser una forma distinta de trabajar el tema desde lo emocional (afrontamiento, regulación, reflexión), no una dinámica escolar.`
+      ? `Este material es para un GRUPO de pacientes/consultantes con perfiles mezclados — genera UNA SOLA actividad que le funcione a todo el grupo: una estrategia de afrontamiento, regulación emocional o reflexión (no una dinámica escolar) que se pueda trabajar de varias formas a la vez (hablándolo, escribiéndolo, dibujándolo o con movimiento), para que nadie se quede fuera por su forma de participar. En "actividades" va ese único elemento, con "inteligencia": "todas".`
       : `Adapta TODO el contenido a la edad e inteligencia(s) indicadas. La actividad debe ser UNA estrategia de afrontamiento, regulación emocional o práctica para casa relacionada con el tema — no una dinámica de tipo escolar. Si se indican varias inteligencias, combina sus técnicas de manera natural en esa única actividad.`
     : modo === "grupo"
-      ? `Este material es para un GRUPO (salón de clase o grupo de pacientes) con perfiles de aprendizaje mezclados — genera UNA actividad para CADA UNA de las 8 inteligencias (tabla completa), no elijas solo una o dos. Así el profesional puede repartir la actividad adecuada según cada estudiante.`
+      ? `Este material es para un GRUPO (salón de clase o grupo de pacientes) con perfiles de aprendizaje mezclados — genera UNA SOLA actividad diseñada para que le entre TODO el grupo, sin importar cómo aprende cada quien: que la misma actividad se pueda resolver hablando, escribiendo, dibujando o moviéndose, y que quien participe pueda elegir cómo entrarle. En "actividades" va ese único elemento, con "inteligencia": "todas". No generes la tabla de las 8 inteligencias.`
       : `Adapta TODO el contenido a la edad, grupo escolar, e inteligencia(s) predominante(s) indicadas. Si se indican varias inteligencias, combina sus técnicas de manera natural en UNA sola actividad (no generes una tabla de las 8).`;
 
   const bloqueEnfoquePsicoeducativo = esPsicoeducativo
@@ -347,7 +356,7 @@ ${
   },
   "esquema_visual": "...",
   "diagrama": { "tipo": "mapa_mental|linea_tiempo|comparativo|proceso|ciclo|jerarquia|partes|ninguno", "titulo": "...", "datos": {} },
-  "actividades": [ { "inteligencia": "linguistica|logico_matematica|espacial|musical|kinestesica|interpersonal|intrapersonal|naturalista", "titulo": "...", "instrucciones": "..." } ],
+  "actividades": [ { "inteligencia": "todas", "titulo": "...", "instrucciones": "..." } ],
   "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["...", "..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
   "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "...", "tarjetas": [ { "frente": "...", "reverso": "..." } ] } ],
@@ -358,7 +367,7 @@ ${
     "autoevaluacion": "..."
   }
 }
-"actividades" debe traer exactamente 8 elementos, uno por cada inteligencia.`
+"actividades" debe traer EXACTAMENTE 1 elemento, con "inteligencia": "todas" — la actividad para todo el grupo.`
     : `{
   "tema": "...",
   "es_de_practica": true,
@@ -568,8 +577,80 @@ async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individ
   }
 }
 
+/**
+ * Genera las 8 actividades de la tabla de Gardner PARA UN TEMA YA GENERADO
+ * (31-ago-2026). Antes esto venía dentro de cada generación de grupo y era
+ * lo más pesado del material; ahora el tema sale con una sola actividad
+ * "para todo el grupo" y estas 8 se piden aparte, solo si el maestro o
+ * psicólogo las quiere (botón "Adaptar por inteligencia" en grupo.html).
+ *
+ * Es una llamada mucho más chica que generar un tema completo: solo recibe
+ * el resumen del tema ya hecho y devuelve las 8 actividades, nada más.
+ */
+async function generarActividadesPorInteligencia(contenido, nivel, enfoque = "escolar") {
+  const nivelLabel = ETIQUETAS_NIVEL[nivel] || "Primaria alta";
+  const edadLabel = EDAD_APROX[nivel] || "9-12";
+  const esPsicoeducativo = enfoque === "psicoeducativo";
+  const r = contenido?.resumen || {};
+  const resumenCorto = [r.que_es, ...(Array.isArray(r.ideas_clave) ? r.ideas_clave : [])]
+    .filter(Boolean)
+    .join(" — ")
+    .slice(0, 900);
+
+  const prompt = `Tema: "${contenido?.tema || ""}" (${nivelLabel}, ${edadLabel} años)
+De qué trata: ${resumenCorto || "(sin resumen)"}
+
+Genera UNA actividad para CADA UNA de las 8 inteligencias múltiples de Gardner, todas sobre ESTE tema — la misma idea trabajada de 8 formas distintas, para que quien enseña reparta a cada estudiante la que mejor le acomode.
+
+Reglas:
+- Cada actividad debe poder hacerse en clase o en casa con materiales comunes, y aterrizada al tema (nada genérico tipo "haz un dibujo del tema").
+- Instrucciones concretas y cortas (2-4 oraciones), en segunda persona y adecuadas a la edad.
+- Que de verdad se distingan entre sí: la kinestésica implica movimiento real, la musical sonido o ritmo, la espacial algo visual, etc.${
+    esPsicoeducativo
+      ? `
+- CONTEXTO PSICOEDUCATIVO: esto NO es material escolar, es acompañamiento emocional (terapia, orientación, consulta). Cada actividad es una estrategia de afrontamiento, regulación o reflexión trabajada desde esa inteligencia. Tono cálido y validante, sin evaluar ni diagnosticar, y sin asumir que los ejemplos describen la vida real de quien participa.`
+      : ""
+  }
+
+Responde SOLO en JSON válido (sin bloque de código, sin texto antes o después):
+{ "actividades": [ { "inteligencia": "linguistica|logico_matematica|espacial|musical|kinestesica|interpersonal|intrapersonal|naturalista", "titulo": "...", "instrucciones": "..." } ] }
+
+Deben ser exactamente 8 elementos, uno por cada inteligencia de la lista, sin repetir ninguna.`;
+
+  const pedir = async () => {
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-5",
+      max_tokens: 4000,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const rawText = response.content.find((b) => b.type === "text")?.text || "{}";
+    const limpio = rawText.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+    const parseado = JSON.parse(limpio);
+    const actividades = (Array.isArray(parseado.actividades) ? parseado.actividades : [])
+      .filter((a) => a && TIPOS_TODOS.includes(a.inteligencia) && a.titulo && a.instrucciones)
+      .map((a) => ({
+        inteligencia: a.inteligencia,
+        titulo: String(a.titulo),
+        instrucciones: String(a.instrucciones),
+      }));
+    // Una sola por inteligencia, en el orden canónico de TIPOS_TODOS.
+    const porTipo = new Map();
+    actividades.forEach((a) => { if (!porTipo.has(a.inteligencia)) porTipo.set(a.inteligencia, a); });
+    const ordenadas = TIPOS_TODOS.map((t) => porTipo.get(t)).filter(Boolean);
+    if (ordenadas.length < 8) throw new Error(`Llegaron ${ordenadas.length} actividades de 8.`);
+    return ordenadas;
+  };
+
+  try {
+    return await pedir();
+  } catch (err) {
+    return await pedir(); // un reintento, igual que generarMaterialTema
+  }
+}
+
 module.exports = {
   generarMaterialTema,
+  generarActividadesPorInteligencia,
   normalizarContenido,
   normalizarImagenes,
   askClaude,
