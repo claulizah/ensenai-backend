@@ -9,6 +9,7 @@ const aprendizajeRouter = require("./routes/aprendizaje");
 const gruposRouter = require("./routes/grupos");
 const temasRouter = require("./routes/temas");
 const referidosRouter = require("./routes/referidos");
+const feedbackRouter = require("./routes/feedback");
 const { stripeWebhookHandler } = require("./routes/stripeWebhook");
 const { inboundEmailWebhookHandler } = require("./routes/inboundEmail");
 const { iniciarBarridoZombis } = require("./utils/trabajos");
@@ -58,6 +59,7 @@ app.use("/api/aprendizaje", aprendizajeRouter);
 app.use("/api/grupos", gruposRouter);
 app.use("/api/temas", temasRouter);
 app.use("/api/referidos", referidosRouter);
+app.use("/api/feedback", feedbackRouter);
 
 app.use((err, req, res, next) => {
   if (err.code === "LIMIT_FILE_SIZE") {
