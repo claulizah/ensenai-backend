@@ -165,11 +165,27 @@ function semillaDe(texto) {
 async function armarTriviaDiaria(userId, cuantas = 5) {
   if (!supabase) return { disponible: false, motivo: "Supabase no está configurado." };
 
-  const { data: temas, error } = await supabase
-    .from("mis_temas")
-    .select("id, tema, contenido")
-    .eq("user_id", userId);
-  if (error) throw new Error(error.message);
+  // Los temas marcados como "ya lo aprendí" (db/schema_v36.sql) no vuelven a
+  // salir en la trivia diaria: es exactamente lo que pidió la usuaria con
+  // "quitar de la racha en caso de ya ser aprendidos". Si la migración
+  // todavía no se corrió, se pide sin esa columna y se sigue como antes.
+  let temas = null;
+  {
+    const conColumna = await supabase
+      .from("mis_temas")
+      .select("id, tema, contenido, aprendido")
+      .eq("user_id", userId)
+      .eq("aprendido", false);
+    if (!conColumna.error) {
+      temas = conColumna.data;
+    } else if (conColumna.error.code === "42703" || /column .*aprendido.* does not exist/i.test(conColumna.error.message || "")) {
+      const sinColumna = await supabase.from("mis_temas").select("id, tema, contenido").eq("user_id", userId);
+      if (sinColumna.error) throw new Error(sinColumna.error.message);
+      temas = sinColumna.data;
+    } else {
+      throw new Error(conColumna.error.message);
+    }
+  }
 
   const pool = [];
   for (const t of temas || []) {
@@ -183,7 +199,10 @@ async function armarTriviaDiaria(userId, cuantas = 5) {
   }
 
   if (!pool.length) {
-    return { disponible: false, motivo: "Genera al menos un tema para desbloquear tu trivia diaria." };
+    return {
+      disponible: false,
+      motivo: "Genera al menos un tema (que no esté marcado como aprendido) para desbloquear tu trivia diaria.",
+    };
   }
 
   const hoy = hoyISO();
