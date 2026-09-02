@@ -179,6 +179,48 @@ function normalizarEtiquetas(valor) {
 }
 
 /**
+ * mis_temas.aprendido llega en db/schema_v36.sql. Si el backend se despliega
+ * ANTES de correr esa migración, PostgREST contesta 42703 ("column does not
+ * exist") y el historial se quedaría en blanco — con el piloto corriendo eso
+ * es inaceptable. Esto lo detecta una sola vez y sigue trabajando como si
+ * ningún tema estuviera aprendido hasta que la columna exista.
+ */
+let faltaColumnaDesde = 0; // 0 = la columna existe (o todavía no sabemos que no)
+const MS_REINTENTAR_COLUMNA = 5 * 60 * 1000;
+const hayColumnaAprendido = () => !faltaColumnaDesde || Date.now() - faltaColumnaDesde > MS_REINTENTAR_COLUMNA;
+const esColumnaFaltante = (error) =>
+  !!error && (error.code === "42703" || /column .*aprendido.* does not exist/i.test(error.message || ""));
+
+/**
+ * Lee los temas del historial de una cuenta, con o sin la columna nueva.
+ * `columnas` NO debe incluir "aprendido": se agrega aquí.
+ */
+async function leerMisTemas(userId, columnas, { etiqueta } = {}) {
+  const armar = (cols) => {
+    let q = supabase.from("mis_temas").select(cols).eq("user_id", userId).order("created_at", { ascending: false });
+    if (etiqueta) q = q.contains("etiquetas", [etiqueta]);
+    return q;
+  };
+
+  if (hayColumnaAprendido()) {
+    const { data, error } = await armar(`${columnas}, aprendido`);
+    if (!error) {
+      faltaColumnaDesde = 0; // ya está: se vuelve al camino normal sin reiniciar Render
+      return data || [];
+    }
+    if (!esColumnaFaltante(error)) throw new Error(error.message);
+    // No se vuelve a intentar en cada petición (sería un error por consulta),
+    // pero sí cada 5 minutos: así, en cuanto se corra db/schema_v36.sql, la
+    // app se recupera sola sin tener que redesplegar.
+    faltaColumnaDesde = Date.now();
+  }
+
+  const { data, error } = await armar(columnas);
+  if (error) throw new Error(error.message);
+  return (data || []).map((t) => ({ ...t, aprendido: false }));
+}
+
+/**
  * Error de generación con código HTTP propio. Existe porque la misma
  * lógica corre en dos lugares: dentro de la petición (POST /generar) y
  * fuera de ella, en un trabajo de segundo plano (POST /generar-async).
@@ -539,19 +581,14 @@ router.get("/mi-plan", requireBuyer, async (req, res) => {
 router.get("/mios", requireBuyer, async (req, res) => {
   if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
   try {
-    let query = supabase
-      .from("mis_temas")
-      .select("id, tema, nivel, pdf_url, etiquetas, created_at")
-      .eq("user_id", req.user.id)
-      .order("created_at", { ascending: false });
+    // "aprendido" viaja en cada tema y el frontend decide cómo mostrarlos
+    // (ver db/schema_v36.sql): así el historial sigue completo — un tema
+    // aprendido se puede reabrir, reimprimir y volver a marcar como pendiente.
+    const temas = await leerMisTemas(req.user.id, "id, tema, nivel, pdf_url, etiquetas, created_at", {
+      etiqueta: req.query.etiqueta,
+    });
 
-    const { etiqueta } = req.query;
-    if (etiqueta) query = query.contains("etiquetas", [etiqueta]);
-
-    const { data, error } = await query;
-    if (error) throw new Error(error.message);
-
-    res.json({ temas: data || [] });
+    res.json({ temas });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -581,25 +618,70 @@ router.get("/mios/:id", requireBuyer, async (req, res) => {
 
 /**
  * PATCH /api/temas/mios/:id
- * body: { etiquetas: string[] }
- * Actualiza las etiquetas de un tema ya guardado en el historial — para
- * poder agregar/corregir etiquetas (ej. "Parcial 1") después de generado,
- * sin tener que gastar un tema nuevo.
+ * body: { etiquetas?: string[], aprendido?: boolean }
+ * Actualiza un tema ya guardado en el historial sin gastar cupo. Dos usos:
+ *  - etiquetas: agregar/corregir etiquetas (ej. "Parcial 1") después.
+ *  - aprendido: marcarlo como ya dominado (2-sep-2026). Al marcarlo, el tema
+ *    sale de "Mi progreso" y sus preguntas dejan de entrar en la trivia
+ *    diaria — o sea, deja de empujar la racha. Es reversible.
+ * Solo se tocan los campos que vengan en el body: mandar solo "aprendido" no
+ * borra las etiquetas, que era el riesgo obvio de reusar esta ruta.
  */
 router.patch("/mios/:id", requireBuyer, async (req, res) => {
   if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
   try {
-    const etiquetas = normalizarEtiquetas(req.body.etiquetas);
+    const cambios = {};
+    if (req.body.etiquetas !== undefined) cambios.etiquetas = normalizarEtiquetas(req.body.etiquetas);
+    if (req.body.aprendido !== undefined) cambios.aprendido = !!req.body.aprendido;
+    if (!Object.keys(cambios).length) {
+      return res.status(400).json({ error: "No mandaste nada que actualizar." });
+    }
+
+    const columnas = cambios.aprendido !== undefined ? "id, etiquetas, aprendido" : "id, etiquetas";
     const { data, error } = await supabase
       .from("mis_temas")
-      .update({ etiquetas })
+      .update(cambios)
       .eq("id", req.params.id)
       .eq("user_id", req.user.id)
-      .select("id, etiquetas")
+      .select(columnas)
       .single();
+    if (error && esColumnaFaltante(error)) {
+      return res.status(503).json({ error: "Falta correr db/schema_v36.sql en Supabase para poder marcar temas como aprendidos." });
+    }
     if (error || !data) return res.status(404).json({ error: "Tema no encontrado." });
 
-    res.json({ status: "etiquetas_actualizadas", etiquetas: data.etiquetas });
+    res.json({ status: "tema_actualizado", etiquetas: data.etiquetas, aprendido: data.aprendido ?? false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/temas/mios/:id
+ * Borra un tema del historial individual, definitivo. Las respuestas de
+ * trivia (v32) y los ejercicios marcados (v33) se van con él por el
+ * "on delete cascade" de sus llaves foráneas.
+ *
+ * NO devuelve cupo del mes: el contador cuenta generaciones hechas, no temas
+ * guardados — si borrar regresara cupo, se podría generar sin límite
+ * borrando cada tema al terminar. El frontend lo advierte antes de borrar.
+ */
+router.delete("/mios/:id", requireBuyer, async (req, res) => {
+  if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
+  try {
+    // Se filtra SIEMPRE por user_id además del id: sin eso, cualquiera con
+    // un id ajeno podría borrar el tema de otra persona.
+    const { data, error } = await supabase
+      .from("mis_temas")
+      .delete()
+      .eq("id", req.params.id)
+      .eq("user_id", req.user.id)
+      .select("id")
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return res.status(404).json({ error: "Tema no encontrado." });
+
+    res.json({ status: "tema_borrado", id: data.id });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1016,6 +1098,80 @@ router.post("/revisar", requireBuyer, async (req, res) => {
 });
 
 /**
+ * POST /api/temas/mios/:id/revisar-ejercicio
+ * body: { indice: number, procedimiento?: string, imagenes?: string[] }
+ *
+ * "Que lo puedas resolver y la IA te diga cómo lo resolviste" (2-sep-2026).
+ * Es la versión POR EJERCICIO de POST /revisar: en vez de mandar una foto
+ * suelta sin contexto, aquí el servidor ya sabe QUÉ ejercicio es y cuál era
+ * su solución, porque los lee del tema guardado (mis_temas.contenido). Eso
+ * es lo que permite decir "te trabaste en el paso 3" en vez de solo revisar
+ * aritmética a ciegas.
+ *
+ * El enunciado y la solución NUNCA se toman del cliente: se leen del tema
+ * (por índice). Si alguien manda un índice que no existe, es 400 — no se
+ * inventa un ejercicio ni se llama a la IA.
+ *
+ * Se puede mandar el procedimiento escrito, fotos, o las dos cosas; con
+ * ninguna, 400. Mismo gateo de plan que /revisar (no suma al contador del
+ * mes, igual que allá) y no guarda nada: es retroalimentación del momento.
+ */
+router.post("/mios/:id/revisar-ejercicio", requireBuyer, async (req, res) => {
+  if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
+  try {
+    const procedimiento = typeof req.body.procedimiento === "string" ? req.body.procedimiento.trim() : "";
+    const imagenes = Array.isArray(req.body.imagenes) ? req.body.imagenes : [];
+    if (!procedimiento && !imagenes.length) {
+      return res.status(400).json({ error: "Escribe cómo lo resolviste o sube una foto para poder revisarlo." });
+    }
+    // Un procedimiento larguísimo casi siempre es un pegado accidental;
+    // además protege el costo de la llamada a la IA.
+    if (procedimiento.length > 4000) {
+      return res.status(400).json({ error: "El procedimiento es demasiado largo — resume los pasos principales." });
+    }
+
+    const indice = Number(req.body.indice);
+    if (!Number.isInteger(indice) || indice < 0) {
+      return res.status(400).json({ error: "Falta decir qué ejercicio es." });
+    }
+
+    const { data: tema, error: temaError } = await supabase
+      .from("mis_temas")
+      .select("id, nivel, contenido")
+      .eq("id", req.params.id)
+      .eq("user_id", req.user.id)
+      .single();
+    if (temaError || !tema) return res.status(404).json({ error: "Tema no encontrado." });
+
+    const ejercicios = Array.isArray(tema.contenido?.ejercicios) ? tema.contenido.ejercicios : [];
+    const ejercicio = ejercicios[indice];
+    if (!ejercicio) return res.status(400).json({ error: "Ese ejercicio ya no existe en el tema." });
+
+    const acceso = await resolverAccesoIndividual(req.user);
+    if (!acceso.permitido) return res.status(402).json({ error: acceso.error });
+
+    const { veredicto, pasos, sugerencia } = await revisarEjercicio(imagenes, {
+      enunciado: ejercicio.enunciado || "",
+      solucion: ejercicio.solucion || ejercicio.respuesta || "",
+      procedimiento,
+      nivel: tema.nivel || "",
+    });
+
+    if (acceso.usaBono) {
+      try {
+        await consumirBono(req.user.id);
+      } catch (errBono) {
+        console.warn("[referidos] no se pudo descontar el bono:", errBono.message);
+      }
+    }
+
+    res.json({ status: "ejercicio_revisado", indice, veredicto, pasos, sugerencia });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /api/temas/trivia-diaria
  * Arma una trivia corta (hasta 5 preguntas) mezclando la trivia de TODOS
  * los temas que el usuario ya generó — no llama a la IA ni gasta cupo del
@@ -1075,17 +1231,22 @@ router.post("/trivia-diaria/completar", requireBuyer, async (req, res) => {
 router.get("/mi-progreso", requireBuyer, async (req, res) => {
   if (!supabase) return res.status(500).json({ error: "Supabase no está configurado." });
   try {
-    const { data: temas, error: temasError } = await supabase
-      .from("mis_temas")
-      .select("id, tema, etiquetas")
-      .eq("user_id", req.user.id);
-    if (temasError) throw new Error(temasError.message);
+    // Los temas marcados como "ya lo aprendí" salen de aquí a propósito
+    // (db/schema_v36.sql): "Mi progreso" es la lista de lo que falta
+    // trabajar, no un archivo histórico. Se siguen contando aparte para
+    // poder felicitar por ellos en pantalla.
+    const todos = await leerMisTemas(req.user.id, "id, tema, etiquetas");
+    const temas = todos.filter((t) => !t.aprendido);
+    const aprendidos = todos.length - temas.length;
 
-    const temaIds = (temas || []).map((t) => t.id);
+    const temaIds = temas.map((t) => t.id);
     if (temaIds.length === 0) {
-      return res.json({ resumen: { temas_con_trivia: 0, promedio_general: null, total_intentos: 0 }, temas: [] });
+      return res.json({
+        resumen: { temas_con_trivia: 0, promedio_general: null, total_intentos: 0, temas_aprendidos: aprendidos },
+        temas: [],
+      });
     }
-    const temasPorId = Object.fromEntries((temas || []).map((t) => [t.id, t]));
+    const temasPorId = Object.fromEntries(temas.map((t) => [t.id, t]));
 
     const { data: intentos, error: intentosError } = await supabase
       .from("respuestas_trivia_individual")
@@ -1135,7 +1296,12 @@ router.get("/mi-progreso", requireBuyer, async (req, res) => {
       : null;
 
     res.json({
-      resumen: { temas_con_trivia: resultado.length, promedio_general: promedioGeneral, total_intentos: totalIntentos },
+      resumen: {
+        temas_con_trivia: resultado.length,
+        promedio_general: promedioGeneral,
+        total_intentos: totalIntentos,
+        temas_aprendidos: aprendidos,
+      },
       temas: resultado,
     });
   } catch (err) {
