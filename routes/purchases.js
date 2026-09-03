@@ -113,17 +113,19 @@ router.post("/checkout-bundle", requireBuyer, async (req, res) => {
 
 /**
  * POST /api/purchases/checkout-suscripcion
- * body: { tipo: "individual"|"grupo", nivel: "aprendemos"|"ilimitado" }
+ * body: { tipo: "individual"|"grupo", nivel: "aprendemos"|"ilimitado",
+ *         periodo: "mensual"|"anual" (opcional, default "mensual") }
  * Crea una sesión de Stripe Checkout en modo "subscription" (recurrente),
  * por el precio del nivel elegido (ver utils/planes.js / schema_v22.sql —
  * reemplaza el modelo anterior de precio de fundador por fecha de registro,
- * schema_v20/v21). Solo mensual por ahora — no hay precio anual definido
- * para los nuevos niveles.
+ * schema_v20/v21). Desde schema_v39 hay también precio ANUAL: 10 meses por
+ * el precio de 12. Se cobra en un solo cargo con recurring interval "year",
+ * lo que además ahorra 11 veces la cuota fija de $3 que Stripe cobra por
+ * transacción.
  *
- * Nota sobre el precio "de lanzamiento": Claudia decidió mostrar estos
- * precios ($79/$109 Aprendemos, $129/$159 Ilimitado) como el precio actual
- * (ya con ~40% de descuento vs. lo que podrían costar más adelante si el
- * piloto valida demanda), sin fecha de corte — el ajuste, si se da, será
+ * Nota sobre el precio "de fundador" (3-sep-2026, schema_v39): Claudia bajó
+ * los precios a $59/$89 Esencial y $99/$129 Ilimitado para conseguir volumen,
+ * con la intención explícita de subirlos más adelante — el ajuste, si se da, será
  * manual en platform_settings el día que se decida. Como Stripe cobra las
  * renovaciones al mismo monto con el que se creó la suscripción, quien se
  * suscriba ahora queda en ese precio mientras no cancele, aunque el precio
@@ -132,6 +134,9 @@ router.post("/checkout-bundle", requireBuyer, async (req, res) => {
 router.post("/checkout-suscripcion", requireBuyer, async (req, res) => {
   try {
     const { tipo, nivel } = req.body;
+    // "periodo" es opcional: las páginas que estén cacheadas sin el campo
+    // siguen mandando solo tipo+nivel y se cobran mensual, como antes.
+    const periodo = req.body.periodo === "anual" ? "anual" : "mensual";
     if (!["individual", "grupo"].includes(tipo)) {
       return res.status(400).json({ error: "tipo debe ser 'individual' o 'grupo'." });
     }
@@ -147,23 +152,45 @@ router.post("/checkout-suscripcion", requireBuyer, async (req, res) => {
     if (settingsRes.error) throw new Error(settingsRes.error.message);
     const settings = settingsRes.data;
 
+    // Precio anual: columna nueva de schema_v39. Si la migración todavía no
+    // se corre, la columna llega undefined y se cae a 10 veces el mensual
+    // (que es justo la regla del plan anual), en vez de cobrar NaN.
+    const precioDe = (mensual, anual) => {
+      if (periodo !== "anual") return Number(mensual);
+      const v = Number(anual);
+      return Number.isFinite(v) && v > 0 ? v : Number(mensual) * 10;
+    };
+
     let amountMxn, limiteLabel;
     if (tipo === "individual" && nivel === "aprendemos") {
-      amountMxn = settings.plan_individual_aprendemos_precio_mxn;
+      amountMxn = precioDe(
+        settings.plan_individual_aprendemos_precio_mxn,
+        settings.plan_individual_aprendemos_precio_anual_mxn
+      );
       limiteLabel = `${settings.plan_individual_aprendemos_limite_temas} temas/mes, hasta ${settings.plan_individual_aprendemos_limite_perfiles} perfiles`;
     } else if (tipo === "individual" && nivel === "ilimitado") {
-      amountMxn = settings.plan_individual_ilimitado_precio_mxn;
+      amountMxn = precioDe(
+        settings.plan_individual_ilimitado_precio_mxn,
+        settings.plan_individual_ilimitado_precio_anual_mxn
+      );
       limiteLabel = `temas ilimitados, hasta ${settings.plan_individual_ilimitado_limite_perfiles} perfiles`;
     } else if (tipo === "grupo" && nivel === "aprendemos") {
-      amountMxn = settings.plan_grupo_aprendemos_precio_mxn;
+      amountMxn = precioDe(
+        settings.plan_grupo_aprendemos_precio_mxn,
+        settings.plan_grupo_aprendemos_precio_anual_mxn
+      );
       limiteLabel = `${settings.plan_grupo_aprendemos_limite_temas} temas-grupo/mes, hasta ${settings.plan_grupo_aprendemos_limite_grupos} grupos`;
     } else {
-      amountMxn = settings.plan_grupo_ilimitado_precio_mxn;
+      amountMxn = precioDe(
+        settings.plan_grupo_ilimitado_precio_mxn,
+        settings.plan_grupo_ilimitado_precio_anual_mxn
+      );
       limiteLabel = `temas-grupo ilimitados, hasta ${settings.plan_grupo_ilimitado_limite_grupos} grupos`;
     }
 
     const nivelLabel = nivel === "aprendemos" ? "Esencial" : "Ilimitado";
-    const label = `Plan ${nivelLabel} — ${tipo === "individual" ? "individual" : "grupo"} (${limiteLabel})`;
+    const periodoLabel = periodo === "anual" ? "anual" : "mensual";
+    const label = `Plan ${nivelLabel} ${periodoLabel} — ${tipo === "individual" ? "individual" : "grupo"} (${limiteLabel})`;
 
     const stripe = getStripe();
     const session = await stripe.checkout.sessions.create({
@@ -175,12 +202,19 @@ router.post("/checkout-suscripcion", requireBuyer, async (req, res) => {
             currency: "mxn",
             product_data: { name: `EnseñAI — ${label}` },
             unit_amount: Math.round(amountMxn * 100),
-            recurring: { interval: "month" },
+            recurring: { interval: periodo === "anual" ? "year" : "month" },
           },
           quantity: 1,
         },
       ],
-      metadata: { type: "suscripcion", tipo, nivel, user_id: req.user.id, precio_mxn: String(amountMxn) },
+      metadata: {
+        type: "suscripcion",
+        tipo,
+        nivel,
+        periodo,
+        user_id: req.user.id,
+        precio_mxn: String(amountMxn),
+      },
       success_url:
         tipo === "grupo"
           ? `${process.env.FRONTEND_URL}/grupo.html?suscripcion=exitosa`
