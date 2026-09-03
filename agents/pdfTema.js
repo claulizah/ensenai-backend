@@ -1,4 +1,5 @@
 const PDFDocument = require("pdfkit");
+const SVGtoPDF = require("svg-to-pdfkit");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -142,8 +143,59 @@ function normalizarResumen(resumen) {
  * agrega la página final de "Hoja de respuestas".
  * @returns {Promise<string>} ruta local del PDF generado (temporal)
  */
-function generarPdfTema(contenidoOriginal, modo = "individual", opciones = {}) {
+/**
+ * Baja las ilustraciones que el tema trae colgadas para poder meterlas en el
+ * PDF (ver adjuntarIlustraciones en routes/temas.js). Son imágenes fijas de
+ * la biblioteca, servidas desde el bucket público de Supabase.
+ *
+ * Todo aquí es best-effort y con reloj: el imprimible tiene que salir aunque
+ * el Storage esté lento o una imagen ya no exista. Lo que no se pudo bajar
+ * simplemente no aparece.
+ */
+async function descargarIlustraciones(contenido) {
+  const lista = Array.isArray(contenido?.ilustraciones) ? contenido.ilustraciones.slice(0, 3) : [];
+  if (!lista.length) return [];
+  // fetch global existe desde Node 18. Si algún día Render corre uno más
+  // viejo, el PDF sale sin ilustraciones en vez de tronar.
+  if (typeof fetch !== "function") return [];
+
+  const bajarUna = async (ilu) => {
+    if (!ilu?.image_url) return null;
+    const control = new AbortController();
+    const reloj = setTimeout(() => control.abort(), 5000);
+    try {
+      const res = await fetch(ilu.image_url, { signal: control.signal });
+      if (!res.ok) return null;
+      const tipo = (res.headers.get("content-type") || "").split(";")[0].trim();
+      const buffer = Buffer.from(await res.arrayBuffer());
+      // 3 MB de tope: una lámina normal pesa unos KB; algo mucho más grande
+      // solo haría gigante el PDF.
+      if (!buffer.length || buffer.length > 3 * 1024 * 1024) return null;
+      // PDFKit solo embebe PNG y JPEG de forma nativa; el SVG se dibuja como
+      // vectores con svg-to-pdfkit (queda nítido al imprimir, no pixelado).
+      if (tipo === "image/svg+xml") return { ...ilu, tipo, svg: buffer.toString("utf8") };
+      if (tipo === "image/png" || tipo === "image/jpeg") return { ...ilu, tipo, buffer };
+      return null; // webp y demás: pdfkit no los soporta
+    } catch (err) {
+      return null;
+    } finally {
+      clearTimeout(reloj);
+    }
+  };
+
+  try {
+    const bajadas = await Promise.all(lista.map(bajarUna));
+    return bajadas.filter(Boolean);
+  } catch (err) {
+    return [];
+  }
+}
+
+async function generarPdfTema(contenidoOriginal, modo = "individual", opciones = {}) {
   const incluirRespuestas = opciones.incluirRespuestas !== false;
+  // Se bajan ANTES de abrir el documento: pdfkit dibuja de forma síncrona y
+  // no se puede esperar una descarga a media página.
+  const ilustraciones = await descargarIlustraciones(contenidoOriginal);
   // Se limpia una sola vez, al entrar: de aquí para abajo todo el texto ya
   // es seguro de imprimir con la fuente del PDF (ver limpiarTexto arriba).
   const contenido = limpiarContenido(contenidoOriginal);
@@ -173,6 +225,130 @@ function generarPdfTema(contenidoOriginal, modo = "individual", opciones = {}) {
         .font("Helvetica-Bold")
         .text(texto, x + 12, doc.y + 1);
       salto(0.6);
+    }
+
+    /**
+     * Dibuja las tarjetas de un recurso de `material_extra` listas para
+     * recortar, dos por renglón.
+     *
+     * - memorama / relacionar: cada par se parte en DOS tarjetas sueltas
+     *   (así funciona el juego de emparejar).
+     * - flashcards / tarjetas: UNA tarjeta partida por la línea de doblez,
+     *   con el frente arriba y el reverso abajo. El reverso va impreso de
+     *   cabeza a propósito: al doblar la mitad de abajo hacia atrás y voltear
+     *   la tarjeta, el texto queda derecho. Sin reverso, la mitad de abajo
+     *   queda en blanco para escribir.
+     */
+    function dibujarTarjetasRecortables(m) {
+      const tarjetas = Array.isArray(m.tarjetas)
+        ? m.tarjetas.filter((t) => t && (t.frente || t.reverso))
+        : [];
+      if (!tarjetas.length) return;
+
+      const esEmparejar = m.tipo === "memorama" || m.tipo === "relacionar";
+      const piezas = [];
+      if (esEmparejar) {
+        tarjetas.forEach((t) => {
+          if (t.frente) piezas.push({ frente: String(t.frente), reverso: null, suelta: true });
+          if (t.reverso) piezas.push({ frente: String(t.reverso), reverso: null, suelta: true });
+        });
+      } else {
+        tarjetas.forEach((t) => {
+          piezas.push({ frente: String(t.frente || ""), reverso: String(t.reverso || ""), suelta: false });
+        });
+      }
+
+      const xIni = doc.page.margins.left;
+      const wTotal = contentWidth();
+      const hueco = 10;
+      const anchoTarjeta = (wTotal - hueco) / 2;
+      const mitad = 46; // alto de cada mitad
+      const altoSuelta = 54;
+
+      salto(0.2);
+      doc.fillColor(GRIS).fontSize(8.5).font("Helvetica-Oblique");
+      doc.text(
+        esEmparejar
+          ? "Recorta cada tarjeta y júntalas en pares."
+          : "Recorta cada tarjeta y dobla hacia atrás por la línea punteada: pregunta de un lado, respuesta del otro.",
+        xIni,
+        doc.y,
+        { width: wTotal }
+      );
+      salto(0.5);
+
+      for (let i = 0; i < piezas.length; i += 2) {
+        const fila = piezas.slice(i, i + 2);
+        const altoFila = fila.some((p) => !p.suelta) ? mitad * 2 : altoSuelta;
+        asegurarEspacio(altoFila + 12);
+        const y = doc.y;
+
+        fila.forEach((pieza, col) => {
+          const x = xIni + col * (anchoTarjeta + hueco);
+          doc
+            .roundedRect(x, y, anchoTarjeta, altoFila, 8)
+            .lineWidth(1)
+            .dash(3, { space: 2 })
+            .strokeColor(AQUA)
+            .stroke();
+          doc.undash();
+
+          if (pieza.suelta) {
+            doc.fillColor(AZUL_PROFUNDO).fontSize(10).font("Helvetica-Bold");
+            doc.text(pieza.frente, x + 8, y + 14, {
+              width: anchoTarjeta - 16,
+              align: "center",
+              height: altoFila - 20,
+              ellipsis: true,
+            });
+            return;
+          }
+
+          // Mitad de arriba: el frente
+          doc.fillColor(AZUL_PROFUNDO).fontSize(9.5).font("Helvetica-Bold");
+          doc.text(pieza.frente, x + 8, y + 12, {
+            width: anchoTarjeta - 16,
+            align: "center",
+            height: mitad - 16,
+            ellipsis: true,
+          });
+
+          // Línea de doblez, justo enmedio
+          doc
+            .lineWidth(0.8)
+            .dash(3, { space: 2 })
+            .strokeColor(AQUA)
+            .moveTo(x, y + mitad)
+            .lineTo(x + anchoTarjeta, y + mitad)
+            .stroke();
+          doc.undash();
+
+          // Mitad de abajo: el reverso, de cabeza (ver docstring)
+          const cx = x + anchoTarjeta / 2;
+          const cy = y + mitad + mitad / 2;
+          doc.save();
+          doc.rotate(180, { origin: [cx, cy] });
+          if (pieza.reverso) {
+            doc.fillColor(BOSQUE).fontSize(9.5).font("Helvetica");
+            doc.text(pieza.reverso, x + 8, y + mitad + 12, {
+              width: anchoTarjeta - 16,
+              align: "center",
+              height: mitad - 16,
+              ellipsis: true,
+            });
+          } else {
+            doc.fillColor(GRIS).fontSize(8).font("Helvetica-Oblique");
+            doc.text("escribe aquí tu respuesta", x + 8, y + mitad + 16, {
+              width: anchoTarjeta - 16,
+              align: "center",
+            });
+          }
+          doc.restore();
+        });
+
+        doc.y = y + altoFila + 8;
+      }
+      salto(0.3);
     }
 
     // Tarjeta con fondo suave — mide el alto del texto antes de dibujar el
@@ -273,6 +449,67 @@ function generarPdfTema(contenidoOriginal, modo = "individual", opciones = {}) {
     if (contenido.esquema_visual) {
       tituloSeccion("Esquema visual");
       tarjeta(contenido.esquema_visual, { fuente: "Courier", tam: 10, colorFondo: "#FFFFFF", colorBorde: LINEA });
+    }
+
+    // --- Ilustraciones de la biblioteca ---
+    // Van al final de la explicación, que es donde ayudan: el alumno lee y
+    // luego ve la lámina. Cada una en su propia caja, una debajo de otra,
+    // para que no salgan diminutas.
+    if (ilustraciones.length) {
+      tituloSeccion("Para verlo");
+      ilustraciones.forEach((ilu) => {
+        const x = doc.page.margins.left;
+        const w = contentWidth();
+        const altoImagen = 190;
+        const credito = [ilu.autor, ilu.licencia].filter(Boolean).join(" · ");
+        const altoCaja = altoImagen + 34 + (credito ? 12 : 0);
+        asegurarEspacio(altoCaja + 10);
+        const y = doc.y;
+
+        doc.roundedRect(x, y, w, altoCaja, 10).lineWidth(1.2).strokeColor(LINEA).stroke();
+
+        try {
+          if (ilu.svg) {
+            SVGtoPDF(doc, ilu.svg, x + 12, y + 10, {
+              width: w - 24,
+              height: altoImagen,
+              assumePt: false,
+              preserveAspectRatio: "xMidYMid meet",
+            });
+          } else {
+            // `fit` por sí solo AGRANDA una imagen chica hasta llenar la
+            // caja, y una lámina de 200px se vería reventada a página
+            // completa. Se limita al tamaño real cuando es más chica.
+            const nativa = doc.openImage(ilu.buffer);
+            const anchoMax = Math.min(w - 24, nativa.width || w - 24);
+            const altoMax = Math.min(altoImagen, nativa.height || altoImagen);
+            doc.image(ilu.buffer, x + 12, y + 10, {
+              fit: [anchoMax, altoMax],
+              align: "center",
+              valign: "center",
+            });
+          }
+        } catch (err) {
+          // Un archivo corrupto no puede tumbar el imprimible entero: se deja
+          // la caja vacía con su nombre y se sigue.
+        }
+
+        doc
+          .fillColor(AZUL_PROFUNDO)
+          .fontSize(10)
+          .font("Helvetica-Bold")
+          .text(ilu.nombre || "", x + 12, y + altoImagen + 16, { width: w - 24, align: "center" });
+        if (credito) {
+          doc
+            .fillColor(GRIS)
+            .fontSize(7.5)
+            .font("Helvetica-Oblique")
+            .text(credito, x + 12, y + altoImagen + 30, { width: w - 24, align: "center" });
+        }
+
+        doc.y = y + altoCaja;
+        salto(0.6);
+      });
     }
 
     // --- Actividad(es) ---
@@ -471,6 +708,11 @@ function generarPdfTema(contenidoOriginal, modo = "individual", opciones = {}) {
           .text(m.contenido || "", x + 12, y + 30, { width: w - 24, lineGap: 3 });
         doc.y = y + alto;
         salto(0.6);
+
+        // Las tarjetas del recurso, listas para recortar. Antes el PDF solo
+        // traía la instrucción ("recorta cada tarjeta y repásalas") y nunca
+        // las tarjetas: no había nada que recortar (reporte 2-sep-2026).
+        dibujarTarjetasRecortables(m);
       });
     }
 

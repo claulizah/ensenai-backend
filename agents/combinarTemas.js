@@ -96,6 +96,7 @@ INSTRUCCIONES:
 - El campo "tema" del resultado debe ser un título corto que junte los temas (ej. "${esExamen ? "Simulacro: Fracciones y Números decimales" : "Repaso: Fracciones y Números decimales"}"), no una lista con comas.
 ${instruccionesEnfoque}
 - Sigue exactamente el mismo formato JSON de salida que un material de tema normal.
+- En "material_extra", si el tipo es flashcards, memorama, relacionar o tarjetas, llena "tarjetas" con una tarjeta por elemento y SIEMPRE con "frente" y "reverso" con texto (se imprimen en una pieza que se dobla a la mitad); nunca metas las tarjetas como texto corrido dentro de "contenido", que ahí va solo la instrucción de una línea. Para crucigrama, glosario o línea del tiempo deja "tarjetas" en [].
 
 FORMATO DE SALIDA — responde SOLO en JSON válido (sin bloque de código, sin texto antes o después), con esta forma exacta:
 ${
@@ -109,7 +110,7 @@ ${
   "actividades": [ { "inteligencia": "todas", "titulo": "...", "instrucciones": "..." } ],
   "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
-  "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "..." } ],
+  "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "...", "tarjetas": [ { "frente": "...", "reverso": "..." } ] } ],
   "respuestas": { "trivia_resuelta": [ { "pregunta": "...", "respuesta": "..." } ], "solucion_actividad": "...", "conceptos_clave": ["...", "..."], "autoevaluacion": "..." }
 }
 "actividades" debe traer EXACTAMENTE 1 elemento, con "inteligencia": "todas".`
@@ -122,7 +123,7 @@ ${
   "actividad": { "titulo": "...", "instrucciones": "..." },
   "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
-  "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "..." } ],
+  "material_extra": [ { "tipo": "flashcards|memorama|crucigrama|glosario|relacionar|linea_tiempo|tarjetas", "contenido": "...", "tarjetas": [ { "frente": "...", "reverso": "..." } ] } ],
   "respuestas": { "trivia_resuelta": [ { "pregunta": "...", "respuesta": "..." } ], "solucion_actividad": "...", "conceptos_clave": ["...", "..."], "autoevaluacion": "..." }
 }`
 }
