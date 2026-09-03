@@ -10,10 +10,59 @@ const { obtenerPlanIndividual, inicioDeMes } = require("../utils/planes");
 const { registrarActividad, obtenerEstadoGamificacion, armarTriviaDiaria } = require("../utils/gamificacion");
 const { obtenerOCrearCodigo, obtenerBono, consumirBono } = require("../utils/referidos");
 const { verificarRespuestas } = require("../utils/trivia");
+const { buscarIlustraciones, anotarFaltante } = require("../utils/iconMatcher");
 const supabase = require("../db/supabase");
 const trabajos = require("../utils/trabajos");
 
 const router = express.Router();
+
+/**
+ * Le cuelga al material las ilustraciones de la biblioteca que le queden
+ * (2-sep-2026, junto con admin.html).
+ *
+ * Son imágenes fijas que la usuaria sube a mano y se empatan por palabras
+ * clave — no se generan con IA. Por eso esto no cuesta nada, no tarda nada
+ * y no puede inventarse un sistema solar con siete planetas.
+ *
+ * Reglas:
+ *   - Nunca lanza. Si la tabla no existe, si Supabase falla o si no hay
+ *     nada que empate, el tema sale sin ilustración y ya. Jamás se le cae
+ *     una generación al usuario por una imagen.
+ *   - En Modo Examen no se pone ninguna: ese material es simulador puro,
+ *     sin explicación (ver el bloque de `enfoque === "examen"`).
+ *   - Si no encontró nada, se anota el tema en ilustraciones_faltantes para
+ *     que el panel de admin muestre qué conviene ilustrar primero.
+ *
+ * El texto de búsqueda es el título más el resumen: el título solo se queda
+ * corto ("Repaso de 3 temas") y el material completo trae demasiado ruido.
+ */
+async function adjuntarIlustraciones(contenido, tema, nivel, enfoque) {
+  try {
+    if (!contenido || enfoque === "examen") return;
+
+    const r = contenido.resumen;
+    const partes = [contenido.tema || tema || ""];
+    if (r && typeof r === "object") {
+      partes.push(r.que_es || "");
+      (r.secciones || []).forEach((sec) => partes.push(sec.titulo || ""));
+      (r.ideas_clave || []).forEach((idea) => partes.push(idea));
+    } else if (typeof r === "string") {
+      partes.push(r);
+    }
+    if (contenido.diagrama?.titulo) partes.push(contenido.diagrama.titulo);
+
+    const texto = partes.filter(Boolean).join(" ");
+    const encontradas = await buscarIlustraciones(texto, { maximo: 3 });
+
+    if (encontradas.length) {
+      contenido.ilustraciones = encontradas;
+    } else {
+      await anotarFaltante(contenido.tema || tema, nivel);
+    }
+  } catch (err) {
+    console.warn("[ilustraciones] no se pudieron adjuntar:", err.message);
+  }
+}
 
 /**
  * Convierte el rango de EDAD_APROX ("3-5", "18+") en un número usable por
@@ -327,6 +376,11 @@ async function ejecutarGeneracionTema(user, params, imagenes) {
     2,
     { onProblemaDetectado: (problemas, intento) => console.warn(`[QA temas/generar] intento ${intento}:`, problemas) }
   );
+
+  // Va ANTES de guardar, para que las ilustraciones queden dentro del
+  // contenido del tema y el historial las conserve aunque después se borre
+  // una de la biblioteca.
+  await adjuntarIlustraciones(contenido, tema, nivel, enfoqueFinal);
 
   let temaId = null;
   let gamificacion = null;
@@ -1006,6 +1060,8 @@ router.post("/combinar", requireBuyer, async (req, res) => {
       if (modoFinal === "grupo") contenido.actividades = [];
       else contenido.actividad = null;
     }
+
+    await adjuntarIlustraciones(contenido, contenido.tema || nombreCombinado, nivelPredominante, enfoqueFinal);
 
     let temaId = null;
     let gamificacion = null;

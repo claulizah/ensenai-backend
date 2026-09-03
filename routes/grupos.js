@@ -262,6 +262,116 @@ router.post("/:id/temas", requireBuyer, async (req, res) => {
 });
 
 /**
+ * GET /api/grupos/:id/temas/:temaId
+ * Para el profesional dueño del grupo — el contenido COMPLETO de un tema ya
+ * compartido (explicación, diagrama, actividades, ejercicios, trivia y
+ * material de repaso).
+ *
+ * GET /mios a propósito no manda `contenido` (pesa mucho y se piden todos los
+ * grupos de un jalón), y eso dejaba al maestro viendo nada más los títulos de
+ * sus temas — sin forma de revisar lo que ya le compartió a su grupo
+ * (reporte 2-sep-2026). Aquí se pide UNO, cuando lo abre.
+ */
+router.get("/:id/temas/:temaId", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { data: grupo, error: grupoError } = await supabase
+      .from("grupos")
+      .select("id, profesional_id")
+      .eq("id", req.params.id)
+      .single();
+    if (grupoError || !grupo) return res.status(404).json({ error: "Grupo no encontrado." });
+    if (grupo.profesional_id !== req.user.id) {
+      return res.status(403).json({ error: "Este grupo no te pertenece." });
+    }
+
+    const { data: tema, error: temaError } = await supabase
+      .from("grupo_temas")
+      .select("id, grupo_id, titulo, contenido, pago_status, pdf_url, created_at")
+      .eq("id", req.params.temaId)
+      .single();
+    if (temaError || !tema || tema.grupo_id !== grupo.id) {
+      return res.status(404).json({ error: "Tema no encontrado en este grupo." });
+    }
+
+    res.json({ tema });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * PATCH /api/grupos/:id/temas/:temaId
+ * body: { titulo?, contenido? }
+ *
+ * El maestro puede corregir un tema que YA está en su liga (una redacción,
+ * una respuesta mal, una actividad que no le sirvió) sin tener que generarlo
+ * otra vez ni gastar cupo. Solo se tocan los campos que vengan en el body.
+ *
+ * No se valida la forma del contenido a propósito: es el mismo JSON que el
+ * frontend acaba de leer de aquí, y g.html ya tolera campos faltantes (los
+ * temas viejos traen formas distintas). Lo que sí se cuida es que el tema
+ * sea de un grupo de quien llama.
+ */
+router.patch("/:id/temas/:temaId", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { titulo, contenido } = req.body || {};
+    if (titulo === undefined && contenido === undefined) {
+      return res.status(400).json({ error: "No mandaste nada que cambiar." });
+    }
+    if (contenido !== undefined && (typeof contenido !== "object" || contenido === null || Array.isArray(contenido))) {
+      return res.status(400).json({ error: "El contenido debe ser un objeto." });
+    }
+
+    const { data: grupo, error: grupoError } = await supabase
+      .from("grupos")
+      .select("id, profesional_id")
+      .eq("id", req.params.id)
+      .single();
+    if (grupoError || !grupo) return res.status(404).json({ error: "Grupo no encontrado." });
+    if (grupo.profesional_id !== req.user.id) {
+      return res.status(403).json({ error: "Este grupo no te pertenece." });
+    }
+
+    const { data: tema, error: temaError } = await supabase
+      .from("grupo_temas")
+      .select("id, grupo_id")
+      .eq("id", req.params.temaId)
+      .single();
+    if (temaError || !tema || tema.grupo_id !== grupo.id) {
+      return res.status(404).json({ error: "Tema no encontrado en este grupo." });
+    }
+
+    const cambios = {};
+    if (titulo !== undefined) {
+      const limpio = String(titulo).trim();
+      if (!limpio) return res.status(400).json({ error: "El título no puede quedar vacío." });
+      cambios.titulo = limpio.slice(0, 300);
+    }
+    if (contenido !== undefined) {
+      cambios.contenido = contenido;
+      // El PDF guardado se armó con el contenido ANTERIOR: dejarlo sería
+      // compartirle al grupo un imprimible que ya no dice lo mismo que la
+      // liga. Se borra la referencia; el maestro puede generar uno nuevo.
+      cambios.pdf_url = null;
+    }
+
+    const { data, error } = await supabase
+      .from("grupo_temas")
+      .update(cambios)
+      .eq("id", tema.id)
+      .select("id, titulo, contenido, pago_status")
+      .single();
+    if (error) throw new Error(error.message);
+
+    res.json({ tema: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * POST /api/grupos/temas/:temaId/actividades
  * body: { nivel?, enfoque? }
  *
