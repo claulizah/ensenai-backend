@@ -78,6 +78,10 @@ function finDePeriodoISO(subscription) {
  */
 async function procesarInicioSuscripcion(session) {
   const { user_id, tipo, nivel, precio_mxn } = session.metadata;
+  // schema_v39: ya existe plan anual. Las sesiones creadas antes de ese
+  // cambio (o por una página cacheada) no traen `periodo`: esas son
+  // mensuales, como siempre.
+  const periodo = session.metadata.periodo === "anual" ? "anual" : "mensual";
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
   const subscription = await stripe.subscriptions.retrieve(session.subscription);
 
@@ -92,12 +96,12 @@ async function procesarInicioSuscripcion(session) {
       // NIVEL del plan, de schema_v22). El código de abajo ya guardaba
       // `nivel` bien; lo que nunca se guardó fue `plan`, y como es NOT
       // NULL, el insert fallaba silenciosamente detrás de un 200 a Stripe.
-      // purchases.js crea toda suscripción con recurring:{interval:"month"}
-      // — no existe opción anual todavía — así que por ahora `plan` es
-      // siempre "mensual". (Un intento anterior de arreglar esto puso
-      // `nivel` en `plan` por error, lo cual violaba el check constraint
-      // porque "ilimitado"/"aprendemos" no son valores válidos de `plan`.)
-      plan: "mensual",
+      // Desde schema_v39, purchases.js manda `periodo` en la metadata y
+      // crea la suscripción con interval "month" o "year" según eso. (Un
+      // intento anterior de arreglar esto puso `nivel` en `plan` por error,
+      // lo cual violaba el check constraint porque "ilimitado"/"aprendemos"
+      // no son valores válidos de `plan`.)
+      plan: periodo,
       stripe_customer_id: session.customer,
       stripe_subscription_id: session.subscription,
       status: "activa",
