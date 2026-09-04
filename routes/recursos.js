@@ -7,6 +7,12 @@
  *
  * Las ilustraciones no salen por aquí a propósito: esas no se piden, se
  * enganchan solas al material de un tema (ver utils/iconMatcher.js).
+ *
+ * Desde schema_v40 el catálogo NO trae la liga del archivo: las plantillas
+ * viven en un bucket privado y la liga se pide aparte, con plan y cupo de
+ * por medio (GET /plantillas/:id/descargar). El catálogo completo sí se ve
+ * para todos —nombre y descripción— porque nadie compra lo que no sabe que
+ * existe: se ve todo, se topa al descargar.
  */
 
 const express = require("express");
@@ -35,7 +41,7 @@ router.get("/plantillas", requireBuyer, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("plantillas")
-      .select("id, nombre, descripcion, categoria, nivel, enfoque, archivo_url, tipo_mime, tamano_bytes, created_at")
+      .select("id, nombre, descripcion, categoria, nivel, enfoque, tipo_mime, tamano_bytes, created_at")
       .eq("publicada", true)
       .order("created_at", { ascending: false });
 
@@ -77,7 +83,7 @@ router.get("/plantillas/para-tema", requireBuyer, async (req, res) => {
 
     const { data, error } = await supabase
       .from("plantillas")
-      .select("id, nombre, descripcion, categoria, nivel, enfoque, archivo_url, tipo_mime")
+      .select("id, nombre, descripcion, categoria, nivel, enfoque, tipo_mime")
       .eq("publicada", true);
     if (error) return res.json({ plantillas: [] });
 
@@ -93,6 +99,140 @@ router.get("/plantillas/para-tema", requireBuyer, async (req, res) => {
     res.json({ plantillas: [] });
   }
 });
+
+/**
+ * GET /api/recursos/plantillas/:id/descargar
+ *
+ * La única puerta a un archivo de la biblioteca (schema_v40). Revisa el
+ * plan, cuenta el mes, y contesta { url } con una liga FIRMADA que vive 5
+ * minutos. El bucket es privado, así que sin pasar por aquí no hay archivo
+ * — y una liga que alguien reenvíe por WhatsApp deja de servir sola.
+ *
+ * Cupos (editables en platform_settings, sin desplegar):
+ *   Gratis    → 3 hojas distintas al mes
+ *   Esencial  → 30
+ *   Ilimitado → sin límite
+ *
+ * Repetir la MISMA hoja en el mismo mes no gasta cupo: si perdiste el
+ * archivo o se atoró la impresora, bájala otra vez sin castigo.
+ */
+router.get("/plantillas/:id/descargar", requireBuyer, async (req, res) => {
+  if (!requireSupabase(res)) return;
+  try {
+    const { data: plantilla, error } = await supabase
+      .from("plantillas")
+      .select("id, nombre, archivo_url, storage_path, publicada")
+      .eq("id", req.params.id)
+      .maybeSingle();
+
+    if (error || !plantilla || !plantilla.publicada) {
+      return res.status(404).json({ error: "Esa plantilla ya no está disponible." });
+    }
+
+    const mes = new Date().toISOString().slice(0, 7); // "2026-09"
+
+    // ¿Ya la había bajado este mes? Entonces ni se revisa el cupo.
+    const { data: yaBajada } = await supabase
+      .from("descargas_plantillas")
+      .select("id")
+      .eq("user_id", req.user.id)
+      .eq("plantilla_id", plantilla.id)
+      .eq("mes", mes)
+      .maybeSingle();
+
+    if (!yaBajada) {
+      const limite = await limiteDescargas(req.user.id);
+      if (limite !== null) {
+        const { count } = await supabase
+          .from("descargas_plantillas")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", req.user.id)
+          .eq("mes", mes);
+
+        if ((count || 0) >= limite) {
+          return res.status(402).json({
+            error: `Ya bajaste tus ${limite} plantillas de este mes. Con el plan Ilimitado son todas las que quieras.`,
+            limite,
+            motivo: "limite_plantillas",
+          });
+        }
+      }
+    }
+
+    const url = await ligaDeDescarga(plantilla);
+    if (!url) return res.status(404).json({ error: "No encontramos el archivo de esa plantilla." });
+
+    // Se registra DESPUÉS de tener la liga: si el archivo no se pudo
+    // firmar, no tiene por qué gastarle el cupo a nadie.
+    if (!yaBajada) {
+      await supabase
+        .from("descargas_plantillas")
+        .insert({ user_id: req.user.id, plantilla_id: plantilla.id, mes });
+      await contarDescarga(plantilla.id);
+    }
+
+    res.json({ url, nombre: plantilla.nombre });
+  } catch (err) {
+    res.status(500).json({ error: "No se pudo preparar la descarga. Intenta de nuevo." });
+  }
+});
+
+/**
+ * Cuántas plantillas distintas puede bajar este mes. null = sin límite.
+ * Se mira el MEJOR plan del usuario: alguien con Ilimitado de grupo no
+ * tiene por qué toparse por su plan individual.
+ */
+async function limiteDescargas(userId) {
+  const { data: subs } = await supabase
+    .from("suscripciones")
+    .select("nivel")
+    .eq("user_id", userId)
+    .eq("status", "activa");
+
+  const niveles = (subs || []).map((s) => s.nivel);
+  if (niveles.includes("ilimitado")) return null;
+
+  const { data: settings } = await supabase.from("platform_settings").select("*").eq("id", 1).single();
+
+  if (niveles.includes("aprendemos")) {
+    const n = Number(settings?.plantillas_limite_esencial);
+    return Number.isFinite(n) ? n : 30;
+  }
+  const n = Number(settings?.plantillas_limite_gratis);
+  return Number.isFinite(n) ? n : 3;
+}
+
+/**
+ * Liga para bajar el archivo. Las plantillas nuevas viven en el bucket
+ * privado y se firman; las que se hayan subido ANTES de schema_v40 traen
+ * una URL pública de verdad en archivo_url y se devuelve tal cual, para no
+ * dejarlas rotas.
+ */
+async function ligaDeDescarga(plantilla) {
+  const guardada = String(plantilla.archivo_url || "");
+  if (guardada.startsWith("http")) return guardada;
+
+  const path = plantilla.storage_path || guardada.replace(/^privado:/, "");
+  if (!path) return null;
+
+  const { data, error } = await supabase.storage.from("plantillas").createSignedUrl(path, 300);
+  if (error || !data?.signedUrl) return null;
+  return data.signedUrl;
+}
+
+/** Sube el contador de la plantilla sin que un fallo cueste la descarga. */
+async function contarDescarga(id) {
+  try {
+    const { data } = await supabase.from("plantillas").select("descargas").eq("id", id).single();
+    if (!data) return;
+    await supabase
+      .from("plantillas")
+      .update({ descargas: (data.descargas || 0) + 1 })
+      .eq("id", id);
+  } catch (err) {
+    /* contar es un extra, nunca puede costarle la descarga a nadie */
+  }
+}
 
 /**
  * POST /api/recursos/plantillas/:id/descarga
