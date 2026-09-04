@@ -37,8 +37,10 @@ const {
   rutaEnBucket,
   normalizarClaves,
 } = require("../utils/archivosBiblioteca");
+const crypto = require("crypto");
 const supabase = require("../db/supabase");
 const { describirPlantilla } = require("../agents/describirPlantilla");
+const { ponerMarca } = require("../utils/marcaAgua");
 
 const router = express.Router();
 const BUCKET = "biblioteca";           // público: ilustraciones
@@ -306,6 +308,47 @@ router.get("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
   }
 });
 
+/**
+ * ¿Ya hay una plantilla con esta huella? (schema_v41)
+ * Si la columna no existe todavía, se contesta null: sin migración no hay
+ * detección de repetidas, pero tampoco se rompe la subida.
+ */
+async function buscarPorHuella(huella) {
+  try {
+    const { data, error } = await supabase
+      .from("plantillas")
+      .select("id, nombre")
+      .eq("hash_archivo", huella)
+      .limit(1);
+    if (error) return null;
+    return (data || [])[0] || null;
+  } catch (err) {
+    return null;
+  }
+}
+
+/** Normaliza para comparar nombres: sin acentos, sin signos, en minúsculas. */
+function clavearNombre(nombre) {
+  return String(nombre || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** ¿Hay otra que se llame prácticamente igual? Solo para avisar. */
+async function buscarPorNombre(nombre) {
+  try {
+    const clave = clavearNombre(nombre);
+    if (!clave) return null;
+    const { data } = await supabase.from("plantillas").select("id, nombre");
+    return (data || []).find((p) => clavearNombre(p.nombre) === clave) || null;
+  } catch (err) {
+    return null;
+  }
+}
+
 /** Liga para VER una plantilla desde el panel. null si no se pudo firmar. */
 async function ligaDeVista(plantilla) {
   const guardada = String(plantilla?.archivo_url || "");
@@ -361,12 +404,42 @@ router.post("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
     const { nombre, descripcion, categoria, nivel, enfoque, publicada, archivoBase64, tipoMime } = req.body || {};
+    // La marca se pone salvo que se pida explícitamente que no.
+    const marcar = req.body?.marcar !== false;
 
     const nombreLimpio = String(nombre || "").trim();
     if (!nombreLimpio) return res.status(400).json({ error: "Ponle un nombre a la plantilla." });
 
     const archivo = leerArchivoSubido(archivoBase64, tipoMime, TIPOS_PLANTILLA);
     if (archivo.error) return res.status(400).json({ error: archivo.error });
+
+    // ── ¿Ya está? (schema_v41)
+    // La huella se saca del archivo COMO LLEGÓ, antes de la marca: si no,
+    // subir dos veces el mismo archivo daría huellas distintas y el
+    // chequeo no serviría de nada.
+    const huella = crypto.createHash("sha256").update(archivo.buffer).digest("hex");
+    const repetida = await buscarPorHuella(huella);
+    if (repetida) {
+      return res.status(409).json({
+        error: `Esa hoja ya está en la biblioteca como "${repetida.nombre}".`,
+        motivo: "repetida",
+        repetida: { id: repetida.id, nombre: repetida.nombre },
+      });
+    }
+
+    // ── La marca de EnseñAI (utils/marcaAgua.js). No la pone la IA: es un
+    // sello en una esquina, trabajo de código.
+    let marcada = false;
+    let avisoMarca = null;
+    if (marcar) {
+      const resultado = await ponerMarca(archivo.buffer, tipoMime);
+      archivo.buffer = resultado.buffer;
+      marcada = resultado.marcada;
+      avisoMarca = resultado.motivo;
+    }
+
+    // ── ¿Hay otra que se llame casi igual? Esto NO bloquea: avisa.
+    const parecida = await buscarPorNombre(nombreLimpio);
 
     const { url, path } = await subirArchivo("plantillas", nombreLimpio, archivo.buffer, archivo.extension, tipoMime);
 
@@ -383,16 +456,52 @@ router.post("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
         tipo_mime: tipoMime,
         tamano_bytes: archivo.buffer.length,
         publicada: !!publicada,
+        hash_archivo: huella,
+        marcada,
       })
       .select()
       .single();
 
     if (error) {
       await borrarArchivo(path);
+      // Si todavía no se corre schema_v41, las columnas nuevas no existen
+      // (42703) y el insert falla entero. Antes que dejarla sin subir, se
+      // reintenta sin ellas: la marca y la huella son extras, la plantilla
+      // es lo importante.
+      if (/hash_archivo|marcada|42703/.test(error.message || "")) {
+        const reintento = await supabase
+          .from("plantillas")
+          .insert({
+            nombre: nombreLimpio.slice(0, 200),
+            descripcion: String(descripcion || "").trim().slice(0, 800) || null,
+            categoria: String(categoria || "otros").trim().slice(0, 60) || "otros",
+            nivel: String(nivel || "").trim() || null,
+            enfoque: enfoque === "escolar" || enfoque === "psicoeducativo" ? enfoque : null,
+            archivo_url: url,
+            storage_path: path,
+            tipo_mime: tipoMime,
+            tamano_bytes: archivo.buffer.length,
+            publicada: !!publicada,
+          })
+          .select()
+          .single();
+        if (reintento.error) throw new Error(reintento.error.message);
+        return res.status(201).json({
+          plantilla: reintento.data,
+          marcada,
+          aviso: "Corre db/schema_v41.sql para que el admin pueda detectar hojas repetidas.",
+        });
+      }
       throw new Error(error.message);
     }
 
-    res.status(201).json({ plantilla: data });
+    res.status(201).json({
+      plantilla: data,
+      marcada,
+      aviso:
+        (parecida ? `Ojo: ya tienes otra que se llama "${parecida.nombre}". No es el mismo archivo, pero revisa que no sobre.` : null) ||
+        (marcar && !marcada && avisoMarca ? `Se subió sin marca: ${avisoMarca}.` : null),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
