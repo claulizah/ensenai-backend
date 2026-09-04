@@ -39,6 +39,23 @@ function requireSupabase(res) {
 router.get("/plantillas", requireBuyer, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
+    // Decisión de Claudia (4-sep-2026): la biblioteca COMPLETA —poder
+    // hurgar en todo el catálogo con buscador y filtros— es del plan
+    // Ilimitado. Los demás planes no se quedan sin material: siguen viendo
+    // las hojas que embonan con el tema que generan (GET /para-tema), que
+    // es el 90% de las veces lo que alguien necesita.
+    //
+    // A quien no le toca se le contesta el CONTEO, no la lista: así la
+    // pantalla puede decir "hay 230 hojas esperándote" sin regalar el
+    // catálogo. Nadie compra lo que no sabe que existe.
+    if (!(await tieneIlimitado(req.user.id))) {
+      const { count } = await supabase
+        .from("plantillas")
+        .select("id", { count: "exact", head: true })
+        .eq("publicada", true);
+      return res.json({ plantillas: [], bloqueada: true, total: count || 0 });
+    }
+
     const { data, error } = await supabase
       .from("plantillas")
       .select("id, nombre, descripcion, categoria, nivel, enfoque, tipo_mime, tamano_bytes, created_at")
@@ -176,6 +193,16 @@ router.get("/plantillas/:id/descargar", requireBuyer, async (req, res) => {
     res.status(500).json({ error: "No se pudo preparar la descarga. Intenta de nuevo." });
   }
 });
+
+/** ¿Tiene alguna suscripción activa de nivel "ilimitado"? */
+async function tieneIlimitado(userId) {
+  const { data } = await supabase
+    .from("suscripciones")
+    .select("nivel")
+    .eq("user_id", userId)
+    .eq("status", "activa");
+  return (data || []).some((s) => s.nivel === "ilimitado");
+}
 
 /**
  * Cuántas plantillas distintas puede bajar este mes. null = sin límite.
