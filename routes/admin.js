@@ -16,8 +16,15 @@
  * compara contra ADMIN_EMAILS de Render, no contra nada que venga en el
  * body (ver middleware/admin.js).
  *
- * Los archivos van al bucket público `biblioteca` (db/schema_v38.sql). Los
- * SVG se limpian ANTES de guardarse — ver utils/archivosBiblioteca.js.
+ * Dónde vive cada archivo (db/schema_v38.sql y v40):
+ *   * ilustraciones → bucket PÚBLICO `biblioteca`: se pintan dentro del
+ *     material del alumno en g.html, que no tiene sesión, y se incrustan
+ *     en el PDF. Tienen que poder abrirse sin credenciales.
+ *   * plantillas → bucket PRIVADO `plantillas`: son lo que se vende. No
+ *     tienen URL pública; el backend firma una liga corta después de
+ *     revisar el plan (ver routes/recursos.js).
+ *
+ * Los SVG se limpian ANTES de guardarse — ver utils/archivosBiblioteca.js.
  */
 
 const express = require("express");
@@ -33,7 +40,16 @@ const {
 const supabase = require("../db/supabase");
 
 const router = express.Router();
-const BUCKET = "biblioteca";
+const BUCKET = "biblioteca";           // público: ilustraciones
+const BUCKET_PLANTILLAS = "plantillas"; // privado: plantillas (schema_v40)
+
+/**
+ * El bucket se decide por la carpeta, no por un parámetro extra, para que
+ * sea imposible guardar una plantilla en el bucket público por descuido.
+ */
+function bucketDe(carpetaOPath) {
+  return String(carpetaOPath || "").startsWith("plantillas") ? BUCKET_PLANTILLAS : BUCKET;
+}
 
 const CATEGORIAS_ILUSTRACION = [
   "emociones",
@@ -54,15 +70,27 @@ function requireSupabase(res) {
   return true;
 }
 
-/** Sube el buffer al bucket y devuelve { url, path }. */
+/**
+ * Sube el buffer al bucket que le toca y devuelve { url, path }.
+ *
+ * Para lo público, `url` es la URL de siempre. Para el bucket privado no
+ * existe tal cosa, así que se guarda el marcador "privado:<path>": la
+ * columna archivo_url es NOT NULL y así, si alguna vez se filtrara una
+ * fila completa, lo que se ve no es una liga descargable sino un texto que
+ * no lleva a ningún lado.
+ */
 async function subirArchivo(carpeta, nombre, buffer, extension, tipoMime) {
+  const bucket = bucketDe(carpeta);
   const path = rutaEnBucket(carpeta, nombre, extension);
-  const { error } = await supabase.storage.from(BUCKET).upload(path, buffer, {
+  const { error } = await supabase.storage.from(bucket).upload(path, buffer, {
     contentType: tipoMime,
     upsert: false,
   });
   if (error) throw new Error(`No se pudo guardar el archivo: ${error.message}`);
-  const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
+
+  if (bucket === BUCKET_PLANTILLAS) return { url: `privado:${path}`, path };
+
+  const { data } = supabase.storage.from(bucket).getPublicUrl(path);
   return { url: data.publicUrl, path };
 }
 
@@ -70,7 +98,7 @@ async function subirArchivo(carpeta, nombre, buffer, extension, tipoMime) {
 async function borrarArchivo(path) {
   if (!path) return;
   try {
-    await supabase.storage.from(BUCKET).remove([path]);
+    await supabase.storage.from(bucketDe(path)).remove([path]);
   } catch (err) {
     /* la fila es lo que importa; un archivo huérfano no rompe nada */
   }
