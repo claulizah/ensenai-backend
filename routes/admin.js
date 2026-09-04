@@ -38,6 +38,7 @@ const {
   normalizarClaves,
 } = require("../utils/archivosBiblioteca");
 const supabase = require("../db/supabase");
+const { describirPlantilla } = require("../agents/describirPlantilla");
 
 const router = express.Router();
 const BUCKET = "biblioteca";           // público: ilustraciones
@@ -293,6 +294,38 @@ router.get("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
     res.json({ plantillas: data || [] });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/plantillas/analizar
+ * body: { archivoBase64, tipoMime, nombreArchivo? }
+ *
+ * Mira la hoja y PROPONE nombre, descripción, categoría, nivel y enfoque
+ * (4-sep-2026, ver agents/describirPlantilla.js). No guarda nada: la
+ * respuesta se pinta en los campos del formulario para que la persona los
+ * revise y corrija antes de subir.
+ *
+ * Va ANTES de POST /plantillas en el archivo por orden de lectura, no
+ * porque Express lo necesite: son rutas distintas, no hay conflicto.
+ */
+router.post("/plantillas/analizar", requireBuyer, requireAdmin, async (req, res) => {
+  try {
+    const { archivoBase64, tipoMime, nombreArchivo } = req.body || {};
+
+    // Se valida igual que al subir: mismo tope de peso y mismos tipos, para
+    // no mandarle a la IA algo que después el guardado va a rechazar.
+    const archivo = leerArchivoSubido(archivoBase64, tipoMime, TIPOS_PLANTILLA);
+    if (archivo.error) return res.status(400).json({ error: archivo.error });
+
+    const propuesta = await describirPlantilla(archivoBase64, tipoMime, nombreArchivo || "");
+    if (!propuesta) {
+      return res.status(422).json({ error: "No pude leer esa hoja. Llena los campos a mano." });
+    }
+    res.json({ propuesta });
+  } catch (err) {
+    // Que la IA falle nunca puede impedir subir una plantilla a mano.
+    res.status(422).json({ error: "No pude proponer los datos ahorita. Llénalos a mano y súbela igual." });
   }
 });
 
