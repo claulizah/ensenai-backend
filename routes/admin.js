@@ -291,11 +291,34 @@ router.get("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
       .select("*")
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
-    res.json({ plantillas: data || [] });
+
+    // Desde schema_v40 las plantillas viven en un bucket PRIVADO, así que
+    // archivo_url ya no sirve para verlas ni para la miniatura: se firma
+    // una liga de una hora para el propio panel. Sin esto, el admin se
+    // quedaba con imágenes rotas y el botón "Ver" no abría nada.
+    const conVista = await Promise.all(
+      (data || []).map(async (p) => ({ ...p, vista_url: await ligaDeVista(p) }))
+    );
+
+    res.json({ plantillas: conVista });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+/** Liga para VER una plantilla desde el panel. null si no se pudo firmar. */
+async function ligaDeVista(plantilla) {
+  const guardada = String(plantilla?.archivo_url || "");
+  if (guardada.startsWith("http")) return guardada; // subida antes de v40
+  const path = plantilla?.storage_path || guardada.replace(/^privado:/, "");
+  if (!path) return null;
+  try {
+    const { data } = await supabase.storage.from(BUCKET_PLANTILLAS).createSignedUrl(path, 3600);
+    return data?.signedUrl || null;
+  } catch (err) {
+    return null;
+  }
+}
 
 /**
  * POST /api/admin/plantillas/analizar
