@@ -41,6 +41,12 @@ const crypto = require("crypto");
 const supabase = require("../db/supabase");
 const { describirPlantilla } = require("../agents/describirPlantilla");
 const { describirIlustracion } = require("../agents/describirIlustracion");
+const {
+  generarIlustracion,
+  modelosDisponibles,
+  costoDe,
+  hayLlave: hayLlaveImagenes,
+} = require("../agents/generarIlustracion");
 const { ponerMarca } = require("../utils/marcaAgua");
 
 const router = express.Router();
@@ -716,6 +722,63 @@ router.patch("/faltantes/:id", requireBuyer, requireAdmin, async (req, res) => {
     res.json({ status: "ok" });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Estudio de ilustraciones — generarlas con IA (5-sep-2026)
+
+   "podría generar una app que utilice dall e para generar mis imágenes y
+   que todas tengan la misma estética?" — pedido de la usuaria.
+
+   El estudio GENERA Y ENSEÑA, pero NO GUARDA. La imagen se devuelve en
+   base64 y se queda en la pantalla hasta que la persona la aprueba; ahí
+   recién se sube con el POST /ilustraciones de siempre, con su dedupe y su
+   catalogación. Se hizo así por dos razones: no llenar el bucket de
+   descartes (que es lo que pasa siempre con esto), y que aprobar pase por
+   ojos humanos — un modelo de imagen se equivoca de formas raras y la
+   biblioteca es lo que ven niños.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * GET /api/admin/estudio/modelos
+ * Qué modelos hay, qué cuesta cada uno y si la llave está puesta. Lo pide
+ * admin.html al abrir la pestaña, para pintar el selector y el estimado sin
+ * que la persona tenga que adivinar cuánto va a gastar.
+ */
+router.get("/estudio/modelos", requireBuyer, requireAdmin, (req, res) => {
+  res.json({
+    modelos: modelosDisponibles(),
+    configurado: hayLlaveImagenes(),
+    // Solo informativo, para pintar el estimado en pesos. Que se vea de
+    // dónde sale el número en vez de un total mágico.
+    tipoCambioAproximado: 17,
+  });
+});
+
+/**
+ * POST /api/admin/estudio/generar
+ * body: { descripcion, modelo?, calidad?, tamano? }
+ *
+ * Una imagen por llamada, a propósito: así el panel puede ir pintando cada
+ * una en cuanto sale y la persona ve avance, en vez de esperar callado dos
+ * minutos por un lote de seis. El bucle vive en el navegador.
+ */
+router.post("/estudio/generar", requireBuyer, requireAdmin, async (req, res) => {
+  try {
+    const { descripcion, modelo, calidad, tamano } = req.body || {};
+    const resultado = await generarIlustracion(descripcion, { modelo, calidad, tamano });
+    res.json({
+      imagen: resultado.base64,
+      tipoMime: resultado.tipoMime,
+      costoUsd: resultado.costoUsd,
+      modelo: resultado.modelo,
+      calidad: resultado.calidad,
+    });
+  } catch (err) {
+    // 502 y no 500: el que falló fue OpenAI, no este servidor. El mensaje
+    // ya viene en español desde el agente.
+    res.status(502).json({ error: err.message });
   }
 });
 
