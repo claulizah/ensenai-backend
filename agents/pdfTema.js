@@ -3,6 +3,7 @@ const SVGtoPDF = require("svg-to-pdfkit");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const EnsenaiFiguras = require("../utils/figuras");
 
 const AZUL_PROFUNDO = "#1E3A8A";
 const AZUL_OSCURO = "#16296B";
@@ -455,6 +456,43 @@ async function generarPdfTema(contenidoOriginal, modo = "individual", opciones =
     // Van al final de la explicación, que es donde ayudan: el alumno lee y
     // luego ve la lámina. Cada una en su propia caja, una debajo de otra,
     // para que no salgan diminutas.
+    // ── Figura o gráfica del tema (5-sep-2026, utils/figuras.js)
+    // Sale VECTORIAL en el PDF: se puede imprimir en tamaño carta o
+    // ampliar y no se pixelea, que es justo lo que hace falta cuando el
+    // niño tiene que medir con regla lo que está dibujado.
+    const dg = contenidoOriginal?.diagrama;
+    if (dg && (dg.tipo === "figura" || dg.tipo === "grafica")) {
+      let svgFigura = "";
+      try {
+        svgFigura = dg.tipo === "figura"
+          ? EnsenaiFiguras.figura(dg.datos || {})
+          : EnsenaiFiguras.grafica(dg.datos || {});
+      } catch (err) {
+        svgFigura = "";
+      }
+      if (svgFigura) {
+        tituloSeccion(dg.titulo ? limpiarTexto(dg.titulo) : "La figura");
+        const x = doc.page.margins.left;
+        const w = contentWidth();
+        const altoCaja = 230;
+        asegurarEspacio(altoCaja + 10);
+        const y = doc.y;
+        doc.roundedRect(x, y, w, altoCaja, 10).lineWidth(1.2).strokeColor(LINEA).stroke();
+        try {
+          SVGtoPDF(doc, svgFigura, x + 14, y + 14, {
+            width: w - 28,
+            height: altoCaja - 28,
+            assumePt: false,
+            preserveAspectRatio: "xMidYMid meet",
+          });
+        } catch (err) {
+          // Igual que con las ilustraciones: una figura que no se pudo
+          // dibujar deja su caja vacía, nunca tumba el imprimible.
+        }
+        doc.y = y + altoCaja + 14;
+      }
+    }
+
     if (ilustraciones.length) {
       tituloSeccion("Para verlo");
       ilustraciones.forEach((ilu) => {
