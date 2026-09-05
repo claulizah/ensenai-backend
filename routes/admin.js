@@ -249,6 +249,11 @@ router.post("/ilustraciones", requireBuyer, requireAdmin, async (req, res) => {
     // `activa` por omisión es true: subir una ilustración y que no se
     // enganche a nada sería la sorpresa, no lo contrario.
     const activa = req.body?.activa !== false;
+    // "Entre estas dos, gana esta" (schema_v43). 0 = sin opinión, que es lo
+    // normal; solo se toca cuando hay dos versiones del mismo concepto.
+    const prioridad = Number.isFinite(Number(req.body?.prioridad))
+      ? Math.max(0, Math.min(100, Math.round(Number(req.body.prioridad))))
+      : 0;
 
     const nombreLimpio = String(nombre || "").trim();
     if (!nombreLimpio) return res.status(400).json({ error: "Ponle un nombre a la ilustración." });
@@ -293,6 +298,7 @@ router.post("/ilustraciones", requireBuyer, requireAdmin, async (req, res) => {
         autor: String(autor || "").trim().slice(0, 200) || null,
         fuente_url: String(fuenteUrl || "").trim().slice(0, 500) || null,
         activa,
+        prioridad,
         hash_archivo: huella,
       })
       .select()
@@ -304,7 +310,7 @@ router.post("/ilustraciones", requireBuyer, requireAdmin, async (req, res) => {
       // Si todavía no se corre schema_v42 la columna no existe (42703) y el
       // insert falla entero. La huella es un extra; la ilustración es lo
       // importante, así que se reintenta sin ella.
-      if (/hash_archivo|42703/.test(error.message || "")) {
+      if (/hash_archivo|prioridad|42703/.test(error.message || "")) {
         const reintento = await supabase
           .from("icon_library")
           .insert({
@@ -351,7 +357,7 @@ router.post("/ilustraciones", requireBuyer, requireAdmin, async (req, res) => {
 router.patch("/ilustraciones/:id", requireBuyer, requireAdmin, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
-    const { nombre, descripcion, categoria, palabrasClave, licencia, autor, fuenteUrl, activa } = req.body || {};
+    const { nombre, descripcion, categoria, palabrasClave, licencia, autor, fuenteUrl, activa, prioridad } = req.body || {};
     const cambios = {};
 
     if (nombre !== undefined) {
@@ -373,6 +379,14 @@ router.patch("/ilustraciones/:id", requireBuyer, requireAdmin, async (req, res) 
     if (autor !== undefined) cambios.autor = String(autor).trim().slice(0, 200) || null;
     if (fuenteUrl !== undefined) cambios.fuente_url = String(fuenteUrl).trim().slice(0, 500) || null;
     if (activa !== undefined) cambios.activa = !!activa;
+    // Prioridad: es el "gana esta" cuando dos láminas son del mismo
+    // concepto (schema_v43). Se acota para que un número absurdo no se
+    // vuelva un desempate imposible de revertir desde la interfaz.
+    if (prioridad !== undefined) {
+      const n = Number(prioridad);
+      if (!Number.isFinite(n)) return res.status(400).json({ error: "La prioridad tiene que ser un número." });
+      cambios.prioridad = Math.max(0, Math.min(100, Math.round(n)));
+    }
 
     if (Object.keys(cambios).length === 0) return res.status(400).json({ error: "No mandaste nada que cambiar." });
     cambios.actualizada_en = new Date().toISOString();
