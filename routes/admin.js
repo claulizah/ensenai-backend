@@ -40,6 +40,7 @@ const {
 const crypto = require("crypto");
 const supabase = require("../db/supabase");
 const { describirPlantilla } = require("../agents/describirPlantilla");
+const { describirIlustracion } = require("../agents/describirIlustracion");
 const { ponerMarca } = require("../utils/marcaAgua");
 
 const router = express.Router();
@@ -161,6 +162,72 @@ router.get("/ilustraciones", requireBuyer, requireAdmin, async (req, res) => {
 });
 
 /**
+ * ¿Ya está esta misma imagen? (schema_v42)
+ *
+ * Si la columna todavía no existe la consulta falla y devuelve null: sin
+ * huella no hay chequeo, pero tampoco se cae la subida.
+ */
+async function buscarIlustracionPorHuella(huella) {
+  try {
+    const { data, error } = await supabase
+      .from("icon_library")
+      .select("id, nombre")
+      .eq("hash_archivo", huella)
+      .limit(1);
+    if (error) return null;
+    return (data || [])[0] || null;
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * POST /api/admin/ilustraciones/analizar
+ * body: { archivoBase64, tipoMime, nombreArchivo? }
+ *
+ * Mira el dibujo y PROPONE nombre, descripción, categoría y —sobre todo—
+ * palabras clave (5-sep-2026, ver agents/describirIlustracion.js). No
+ * guarda nada.
+ *
+ * Aquí la IA pesa más que en plantillas: una plantilla sin buenos datos
+ * igual se puede buscar por nombre, pero una ilustración sin palabras
+ * clave NO SE ENGANCHA A NADA — es un archivo muerto en el bucket. Por eso
+ * también avisa si esa imagen ya está subida, antes de que la persona
+ * llene el formulario de algo que va a rebotar.
+ */
+router.post("/ilustraciones/analizar", requireBuyer, requireAdmin, async (req, res) => {
+  try {
+    const { archivoBase64, tipoMime, nombreArchivo } = req.body || {};
+
+    const archivo = leerArchivoSubido(archivoBase64, tipoMime, TIPOS_ILUSTRACION);
+    if (archivo.error) return res.status(400).json({ error: archivo.error });
+
+    // El aviso de repetida va aparte de la propuesta: que la IA falle no
+    // debe tapar el dato de que ya la tienes, ni al revés.
+    let repetida = null;
+    if (supabase) {
+      const huella = crypto.createHash("sha256").update(archivo.buffer).digest("hex");
+      const encontrada = await buscarIlustracionPorHuella(huella);
+      if (encontrada) repetida = { id: encontrada.id, nombre: encontrada.nombre };
+    }
+
+    let propuesta = null;
+    try {
+      propuesta = await describirIlustracion(archivoBase64, tipoMime, nombreArchivo || "");
+    } catch (err) {
+      propuesta = null;
+    }
+
+    if (!propuesta && !repetida) {
+      return res.status(422).json({ error: "No pude leer esa imagen. Llena los campos a mano." });
+    }
+    res.json({ propuesta, repetida });
+  } catch (err) {
+    res.status(422).json({ error: "No pude proponer los datos ahorita. Llénalos a mano y súbela igual." });
+  }
+});
+
+/**
  * POST /api/admin/ilustraciones
  * body: { nombre, categoria, palabrasClave, descripcion?, licencia?, autor?,
  *         fuenteUrl?, archivoBase64, tipoMime }
@@ -173,6 +240,9 @@ router.post("/ilustraciones", requireBuyer, requireAdmin, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
     const { nombre, categoria, palabrasClave, descripcion, licencia, autor, fuenteUrl, archivoBase64, tipoMime } = req.body || {};
+    // `activa` por omisión es true: subir una ilustración y que no se
+    // enganche a nada sería la sorpresa, no lo contrario.
+    const activa = req.body?.activa !== false;
 
     const nombreLimpio = String(nombre || "").trim();
     if (!nombreLimpio) return res.status(400).json({ error: "Ponle un nombre a la ilustración." });
@@ -186,6 +256,19 @@ router.post("/ilustraciones", requireBuyer, requireAdmin, async (req, res) => {
 
     const archivo = leerArchivoSubido(archivoBase64, tipoMime, TIPOS_ILUSTRACION);
     if (archivo.error) return res.status(400).json({ error: archivo.error });
+
+    // ── ¿Ya está? (schema_v42)
+    // Una ilustración repetida no solo estorba en el panel: se engancha dos
+    // veces al mismo tema y el material sale con el dibujo duplicado.
+    const huella = crypto.createHash("sha256").update(archivo.buffer).digest("hex");
+    const repetida = await buscarIlustracionPorHuella(huella);
+    if (repetida) {
+      return res.status(409).json({
+        error: `Esa imagen ya está en la biblioteca como "${repetida.nombre}".`,
+        motivo: "repetida",
+        repetida: { id: repetida.id, nombre: repetida.nombre },
+      });
+    }
 
     const { url, path } = await subirArchivo("ilustraciones", nombreLimpio, archivo.buffer, archivo.extension, tipoMime);
 
@@ -203,13 +286,47 @@ router.post("/ilustraciones", requireBuyer, requireAdmin, async (req, res) => {
         licencia: String(licencia || "").trim().slice(0, 120) || null,
         autor: String(autor || "").trim().slice(0, 200) || null,
         fuente_url: String(fuenteUrl || "").trim().slice(0, 500) || null,
-        activa: true,
+        activa,
+        hash_archivo: huella,
       })
       .select()
       .single();
 
     if (error) {
-      await borrarArchivo(path); // no dejar el archivo suelto si falló la fila
+      // El archivo se borra hasta saber que no hay reintento — si no, la
+      // fila del reintento apuntaría a un archivo ya borrado.
+      // Si todavía no se corre schema_v42 la columna no existe (42703) y el
+      // insert falla entero. La huella es un extra; la ilustración es lo
+      // importante, así que se reintenta sin ella.
+      if (/hash_archivo|42703/.test(error.message || "")) {
+        const reintento = await supabase
+          .from("icon_library")
+          .insert({
+            nombre: nombreLimpio.slice(0, 200),
+            descripcion: String(descripcion || "").trim().slice(0, 500) || null,
+            categoria,
+            palabras_clave: claves,
+            image_url: url,
+            storage_path: path,
+            tipo_mime: tipoMime,
+            tamano_bytes: archivo.buffer.length,
+            licencia: String(licencia || "").trim().slice(0, 120) || null,
+            autor: String(autor || "").trim().slice(0, 200) || null,
+            fuente_url: String(fuenteUrl || "").trim().slice(0, 500) || null,
+            activa,
+          })
+          .select()
+          .single();
+        if (reintento.error) {
+          await borrarArchivo(path);
+          throw new Error(reintento.error.message);
+        }
+        return res.status(201).json({
+          ilustracion: reintento.data,
+          aviso: "Corre db/schema_v42.sql para que el admin pueda detectar imágenes repetidas.",
+        });
+      }
+      await borrarArchivo(path);
       throw new Error(error.message);
     }
 
@@ -463,7 +580,9 @@ router.post("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
       .single();
 
     if (error) {
-      await borrarArchivo(path);
+      // Ojo con el orden: el archivo NO se borra todavía. Si el fallo es
+      // solo por las columnas nuevas, el reintento se queda con este mismo
+      // archivo; borrarlo aquí dejaría la fila apuntando a la nada.
       // Si todavía no se corre schema_v41, las columnas nuevas no existen
       // (42703) y el insert falla entero. Antes que dejarla sin subir, se
       // reintenta sin ellas: la marca y la huella son extras, la plantilla
@@ -485,13 +604,17 @@ router.post("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
           })
           .select()
           .single();
-        if (reintento.error) throw new Error(reintento.error.message);
+        if (reintento.error) {
+          await borrarArchivo(path);
+          throw new Error(reintento.error.message);
+        }
         return res.status(201).json({
           plantilla: reintento.data,
           marcada,
           aviso: "Corre db/schema_v41.sql para que el admin pueda detectar hojas repetidas.",
         });
       }
+      await borrarArchivo(path);
       throw new Error(error.message);
     }
 
