@@ -52,7 +52,7 @@ async function adjuntarIlustraciones(contenido, tema, nivel, enfoque) {
     if (contenido.diagrama?.titulo) partes.push(contenido.diagrama.titulo);
 
     const texto = partes.filter(Boolean).join(" ");
-    const encontradas = await buscarIlustraciones(texto, { maximo: 3 });
+    const encontradas = await buscarIlustraciones(texto, { maximo: 2 });
 
     if (encontradas.length) {
       contenido.ilustraciones = encontradas;
