@@ -57,6 +57,13 @@ async function obtenerPlanIndividual(userId) {
       limite_temas_mes: null,
       limite_perfiles: settings.plan_individual_ilimitado_limite_perfiles,
       limite_examenes_mes: null,
+      // Techo de uso justo (schema_v44). NO es una cuota comercial: son
+      // ~10 temas diarios todos los días, que nadie legítimo alcanza. Es
+      // el seguro contra la cuenta compartida entre veinte maestros o el
+      // script desbocado, que con "ilimitado" literal costaba miles de
+      // pesos al mes. Si la columna no existe todavía, queda en null y el
+      // comportamiento es exactamente el de antes.
+      tope_justo: settings.tope_justo_temas_individual ?? null,
     };
   }
   if (sus?.nivel === "aprendemos") {
@@ -107,6 +114,7 @@ async function obtenerPlanGrupo(userId) {
       precio_mxn: settings.plan_grupo_ilimitado_precio_mxn,
       limite_temas_mes: null,
       limite_grupos: settings.plan_grupo_ilimitado_limite_grupos,
+      tope_justo: settings.tope_justo_temas_grupo ?? null,
     };
   }
   if (sus?.nivel === "aprendemos") {
@@ -125,6 +133,42 @@ async function obtenerPlanGrupo(userId) {
   };
 }
 
+/**
+ * Los precios de todos los planes, leídos de platform_settings.
+ *
+ * Existe por un problema real que se encontró antes de lanzar: los precios
+ * estaban escritos A MANO dentro de los mensajes de error ("Ilimitado por
+ * $129 MXN/mes"). Cuando Claudia los bajó, la página de ventas quedó en
+ * $59/$99 y los mensajes siguieron diciendo $79/$129 — el cliente leía un
+ * precio, aceptaba otros términos y se topaba con un tercer número justo
+ * en el momento de decidir si pagaba.
+ *
+ * Cualquier texto que mencione un precio tiene que salir de aquí. Así,
+ * cambiar el precio en platform_settings lo cambia en todos lados.
+ *
+ * Nunca lanza: si la consulta falla, devuelve null y quien lo llame arma
+ * su mensaje sin cifras, que es mejor que decir una equivocada.
+ */
+async function obtenerPrecios() {
+  try {
+    const s = await obtenerSettings();
+    return {
+      individual: {
+        esencial: s.plan_individual_aprendemos_precio_mxn,
+        ilimitado: s.plan_individual_ilimitado_precio_mxn,
+        esencial_limite: s.plan_individual_aprendemos_limite_temas,
+      },
+      grupo: {
+        esencial: s.plan_grupo_aprendemos_precio_mxn,
+        ilimitado: s.plan_grupo_ilimitado_precio_mxn,
+        esencial_limite: s.plan_grupo_aprendemos_limite_temas,
+      },
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
 function inicioDeMes() {
   const d = new Date();
   d.setDate(1);
@@ -132,4 +176,9 @@ function inicioDeMes() {
   return d;
 }
 
-module.exports = { obtenerPlanIndividual, obtenerPlanGrupo, inicioDeMes };
+module.exports = {
+  obtenerPrecios,
+  obtenerPlanIndividual,
+  obtenerPlanGrupo,
+  inicioDeMes,
+};
