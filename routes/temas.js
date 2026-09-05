@@ -6,7 +6,8 @@ const { combinarTemas } = require("../agents/combinarTemas");
 const { revisarEjercicio } = require("../agents/revisarEjercicio");
 const { verificarYCorregir } = require("../utils/revisorCalidad");
 const { requireBuyer } = require("../middleware/auth");
-const { obtenerPlanIndividual, inicioDeMes } = require("../utils/planes");
+const { obtenerPlanIndividual, obtenerPrecios, inicioDeMes } = require("../utils/planes");
+const { avisarTopeJusto } = require("../utils/avisoTope");
 const { registrarActividad, obtenerEstadoGamificacion, armarTriviaDiaria } = require("../utils/gamificacion");
 const { obtenerOCrearCodigo, obtenerBono, consumirBono } = require("../utils/referidos");
 const { verificarRespuestas } = require("../utils/trivia");
@@ -110,12 +111,49 @@ function estaEnMesDeRegistro(fechaCreacion) {
  * Regresa { permitido: true, origen, usaBono? } si puede generar, o
  * { permitido: false, error } con un mensaje listo para regresar al usuario.
  */
+/** Cuántos temas individuales lleva este usuario en el mes calendario. */
+async function temasDelMes(userId) {
+  const { count, error } = await supabase
+    .from("mis_temas")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .eq("tipo", "tema")
+    .gte("created_at", inicioDeMes().toISOString());
+  if (error) throw new Error(error.message);
+  return count || 0;
+}
+
 async function resolverAccesoIndividual(user) {
   const userId = user.id;
   const plan = await obtenerPlanIndividual(userId);
 
   if (plan.limite_temas_mes === null) {
-    return { permitido: true, origen: plan.nivel }; // ilimitado
+    // ── Ilimitado, pero con techo de uso justo (schema_v44)
+    // "Ilimitado" era literal y eso es un agujero de dinero: cada tema
+    // cuesta ~$1 MXN de API y el plan cobra ~$99 al mes, así que una sola
+    // cuenta compartida entre veinte maestros deja miles de pesos de
+    // pérdida. El tope son ~10 temas diarios TODOS los días: nadie que lo
+    // use de verdad lo ve. Si no está configurado (columna sin crear),
+    // se comporta igual que antes y no bloquea a nadie.
+    const tope = plan.tope_justo;
+    if (!tope) return { permitido: true, origen: plan.nivel };
+
+    const usados = await temasDelMes(userId);
+    if (usados < tope) return { permitido: true, origen: plan.nivel };
+
+    // Que ALGUIEN llegue aquí es raro y es información valiosa: puede ser
+    // una cuenta compartida, un script, o un cliente enorme al que
+    // conviene subirle el tope. El aviso es best effort — que falle el
+    // correo no puede afectar lo que ve el usuario.
+    avisarTopeJusto({ correo: user.email, usados, tope, tipo: "individual" });
+
+    return {
+      permitido: false,
+      error:
+        `Llevas ${usados} temas este mes, que es el máximo de uso justo del plan Ilimitado. ` +
+        `No es un cobro extra ni un error: es un tope de seguridad muy alto. ` +
+        `Escríbenos a contacto@ensenai.com y te lo subimos el mismo día.`,
+    };
   }
 
   let limiteEfectivo = plan.limite_temas_mes;
@@ -123,15 +161,9 @@ async function resolverAccesoIndividual(user) {
     limiteEfectivo = Math.max(limiteEfectivo, plan.limite_gratis_boost);
   }
 
-  const { count, error: countError } = await supabase
-    .from("mis_temas")
-    .select("id", { count: "exact", head: true })
-    .eq("user_id", userId)
-    .eq("tipo", "tema")
-    .gte("created_at", inicioDeMes().toISOString());
-  if (countError) throw new Error(countError.message);
+  const count = await temasDelMes(userId);
 
-  if ((count || 0) < limiteEfectivo) {
+  if (count < limiteEfectivo) {
     return { permitido: true, origen: plan.nivel };
   }
 
@@ -140,12 +172,23 @@ async function resolverAccesoIndividual(user) {
     return { permitido: true, origen: plan.nivel, usaBono: true };
   }
 
+  // Los precios se LEEN de platform_settings, nunca se escriben aquí.
+  // Antes estaban a mano y al bajarlos quedaron desfasados: la portada
+  // decía $59 y este mensaje seguía diciendo $79, justo en el momento en
+  // que la persona decide si paga. Si la consulta falla, el mensaje sale
+  // sin cifras — mejor eso que una cifra equivocada.
+  const precios = await obtenerPrecios();
+  const ind = precios?.individual;
+  const oferta = ind
+    ? ` (Esencial: ${ind.esencial_limite} temas/mes por $${ind.esencial} MXN, o Ilimitado por $${ind.ilimitado} MXN/mes)`
+    : "";
+
   return {
     permitido: false,
     error:
       plan.nivel === "gratis"
-        ? `Ya usaste tus ${limiteEfectivo} temas gratis de este mes. Mejora tu plan para seguir generando (Esencial: 20 temas/mes por $79 MXN, o Ilimitado por $129 MXN/mes), o comparte tu código de referido para ganar temas de regalo.`
-        : `Ya usaste los ${limiteEfectivo} temas de tu plan Esencial este mes. Cambia a Ilimitado para generar sin límite, o comparte tu código de referido para ganar temas de regalo.`,
+        ? `Ya usaste tus ${limiteEfectivo} temas gratis de este mes. Mejora tu plan para seguir generando${oferta}, o comparte tu código de referido para ganar temas de regalo.`
+        : `Ya usaste los ${limiteEfectivo} temas de tu plan Esencial este mes.${ind ? ` Cambia a Ilimitado por $${ind.ilimitado} MXN/mes para generar sin límite` : " Cambia a Ilimitado para generar sin límite"}, o comparte tu código de referido para ganar temas de regalo.`,
   };
 }
 
