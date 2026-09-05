@@ -3,6 +3,7 @@ const Stripe = require("stripe");
 const { slugify } = require("../utils/slugify");
 const { requireBuyer } = require("../middleware/auth");
 const { obtenerPlanGrupo, inicioDeMes } = require("../utils/planes");
+const { avisarTopeJusto } = require("../utils/avisoTope");
 const { primerNombre } = require("../utils/nombre");
 const { registrarActividadAlumno, rachasDelGrupo } = require("../utils/rachaAlumno");
 const { verificarRespuestas } = require("../utils/trivia");
@@ -227,22 +228,45 @@ router.post("/:id/temas", requireBuyer, async (req, res) => {
       // llegó al tope), el tema queda "pendiente" — se paga suelto o se
       // sube de plan.
       const plan = await obtenerPlanGrupo(req.user.id);
-      if (plan.nivel === "ilimitado") {
-        pagoStatus = "cubierto_suscripcion";
-      } else if (plan.nivel === "aprendemos") {
+
+      /** Temas-grupo cubiertos por suscripción que lleva este profesional en el mes. */
+      const contarCubiertosDelMes = async () => {
         const { data: misGrupos } = await supabase
           .from("grupos")
           .select("id")
           .eq("profesional_id", req.user.id);
         const idsMisGrupos = (misGrupos || []).map((g) => g.id);
-        const { count: usadosEsteMes, error: usadosError } = await supabase
+        if (!idsMisGrupos.length) return 0;
+        const { count, error: usadosError } = await supabase
           .from("grupo_temas")
           .select("id", { count: "exact", head: true })
           .in("grupo_id", idsMisGrupos)
           .eq("pago_status", "cubierto_suscripcion")
           .gte("created_at", inicioDeMes().toISOString());
         if (usadosError) throw new Error(usadosError.message);
-        pagoStatus = (usadosEsteMes || 0) < plan.limite_temas_mes ? "cubierto_suscripcion" : "pendiente";
+        return count || 0;
+      };
+
+      if (plan.nivel === "ilimitado") {
+        // Mismo techo de uso justo que en individual (schema_v44). Aquí el
+        // tope no deja al maestro sin material: el tema se agrega igual,
+        // solo que queda "pendiente" de pago suelto en vez de cubierto por
+        // la suscripción. Nadie se queda parado a media clase.
+        const tope = plan.tope_justo;
+        if (!tope) {
+          pagoStatus = "cubierto_suscripcion";
+        } else {
+          const usados = await contarCubiertosDelMes();
+          if (usados < tope) {
+            pagoStatus = "cubierto_suscripcion";
+          } else {
+            avisarTopeJusto({ correo: req.user.email, usados, tope, tipo: "grupo" });
+            pagoStatus = "pendiente";
+          }
+        }
+      } else if (plan.nivel === "aprendemos") {
+        const usadosEsteMes = await contarCubiertosDelMes();
+        pagoStatus = usadosEsteMes < plan.limite_temas_mes ? "cubierto_suscripcion" : "pendiente";
       } else {
         pagoStatus = "pendiente";
       }
