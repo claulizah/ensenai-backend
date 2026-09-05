@@ -1,4 +1,5 @@
 const Anthropic = require("@anthropic-ai/sdk");
+const EnsenaiFiguras = require("../utils/figuras");
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -235,6 +236,29 @@ Elige el tipo según lo que el tema realmente es:
 | \`ciclo\` | Las etapas se repiten en círculo (agua, vida, estaciones) | \`{ "etapas": [ { "titulo": "Evaporación", "detalle": "..." } ] }\` — de 3 a 6 etapas |
 | \`jerarquia\` | Hay categorías que se subdividen (clasificaciones, taxonomías) | \`{ "raiz": "...", "niveles": [ { "titulo": "...", "hijos": ["...", "..."] } ] }\` |
 | \`partes\` | Algo se descompone en partes que conviene etiquetar | \`{ "todo": "La célula", "partes": [ { "nombre": "Núcleo", "funcion": "..." } ] }\` — de 3 a 6 partes |
+| \`figura\` | El tema es de geometría o medición y hay una figura concreta que ver | \`{ "forma": "rectangulo", "base": 8, "altura": 5, "unidad": "cm" }\` — ver la lista de formas abajo |
+| \`grafica\` | Hay datos que se entienden mejor comparados | \`{ "forma": "barras", "etiquetas": ["Lunes","Martes"], "valores": [4, 8] }\` — \`barras\`, \`pastel\` o \`linea\`, de 2 a 8 datos |
+
+#### Formas para \`figura\` — TÚ SOLO DAS LOS NÚMEROS, la plataforma dibuja
+Nunca escribas SVG ni describas el dibujo con palabras: entrega medidas y ya. El dibujo se hace a escala con esos números, así que **siempre cuadra con la cuenta** que le pidas al alumno.
+
+| \`forma\` | Campos que necesita |
+|---|---|
+| \`rectangulo\` | \`base\`, \`altura\` — agrega \`"cuadricula": true\` si quieres que se vean los cuadritos para contarlos (solo con medidas enteras y hasta 144 cuadros) |
+| \`cuadrado\` | \`lado\` |
+| \`triangulo\` | \`base\`, \`altura\` (la altura sale marcada con línea punteada y ángulo recto) |
+| \`circulo\` | \`radio\` o \`diametro\` |
+| \`trapecio\` | \`base_mayor\`, \`base_menor\`, \`altura\` |
+| \`romboide\` | \`base\`, \`altura\` |
+| \`poligono\` | \`lados\` (3 a 12), \`lado\` |
+| \`compuesta\` | \`a\` ancho total, \`b\` alto total, \`c\` ancho del pedazo de abajo, \`d\` alto del pedazo de arriba — es la figura en "L" clásica de área; \`c\` debe ser menor que \`a\` y \`d\` menor que \`b\` |
+| \`prisma\` | \`largo\`, \`ancho\`, \`alto\` — para volumen |
+| \`fraccion\` | \`partes\` (2 a 12), \`sombreadas\`; agrega \`"estilo": "circulo"\` si la quieres redonda en vez de barra |
+| \`recta_numerica\` | \`desde\`, \`hasta\` (máximo 24 de diferencia); opcional \`marca\` con el número o números a señalar |
+
+Todas aceptan \`unidad\` (\`"cm"\`, \`"m"\`, \`"km"\`…). Si no la pones, se usa cm.
+
+**Cuándo NO usar \`figura\`:** si el tema no es de geometría ni de medición. Un tema de historia con un rectángulo dibujado no ayuda a nadie.
 
 Reglas del diagrama:
 - **Textos MUY cortos.** Cada etiqueta de 1 a 4 palabras; los campos \`detalle\` máximo una línea. Un diagrama con frases largas deja de ser diagrama.
@@ -355,7 +379,7 @@ ${
     "truco": "..."
   },
   "esquema_visual": "...",
-  "diagrama": { "tipo": "mapa_mental|linea_tiempo|comparativo|proceso|ciclo|jerarquia|partes|ninguno", "titulo": "...", "datos": {} },
+  "diagrama": { "tipo": "mapa_mental|linea_tiempo|comparativo|proceso|ciclo|jerarquia|partes|figura|grafica|ninguno", "titulo": "...", "datos": {} },
   "actividades": [ { "inteligencia": "todas", "titulo": "...", "instrucciones": "..." } ],
   "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["...", "..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
@@ -380,7 +404,7 @@ ${
     "truco": "..."
   },
   "esquema_visual": "...",
-  "diagrama": { "tipo": "mapa_mental|linea_tiempo|comparativo|proceso|ciclo|jerarquia|partes|ninguno", "titulo": "...", "datos": {} },
+  "diagrama": { "tipo": "mapa_mental|linea_tiempo|comparativo|proceso|ciclo|jerarquia|partes|figura|grafica|ninguno", "titulo": "...", "datos": {} },
   "actividad": { "titulo": "...", "instrucciones": "..." },
   "ejercicios": [ { "enunciado": "...", "pista": "...", "pasos": ["...", "..."], "respuesta": "..." } ],
   "trivia": [ { "pregunta": "...", "tipo": "vf|opcion|abierta|caso", "opciones": ["...","..."], "respuesta_correcta": "..." } ],
@@ -495,10 +519,25 @@ function normalizarContenido(c) {
   // diagrama que dibujar uno vacío o de un tipo que no sabemos pintar.
   const TIPOS_DIAGRAMA = ["mapa_mental", "linea_tiempo", "comparativo", "proceso", "ciclo", "jerarquia", "partes"];
   let diagrama = null;
-  if (c.diagrama && typeof c.diagrama === "object" && TIPOS_DIAGRAMA.includes(c.diagrama.tipo)) {
+  if (c.diagrama && typeof c.diagrama === "object") {
+    const tipo = c.diagrama.tipo;
     const datos = c.diagrama.datos && typeof c.diagrama.datos === "object" ? c.diagrama.datos : {};
-    if (Object.keys(datos).length) {
-      diagrama = { tipo: c.diagrama.tipo, titulo: String(c.diagrama.titulo || ""), datos };
+
+    if (TIPOS_DIAGRAMA.includes(tipo) && Object.keys(datos).length) {
+      diagrama = { tipo, titulo: String(c.diagrama.titulo || ""), datos };
+    } else if (tipo === "figura" || tipo === "grafica") {
+      // Las figuras se validan DIBUJÁNDOLAS aquí mismo (utils/figuras.js).
+      // No basta con revisar que el tipo exista: un rectángulo sin altura,
+      // una "L" cuyo corte no cabe o una gráfica con un solo dato pasan
+      // cualquier revisión de campos y salen como un dibujo roto. Si el
+      // dibujante devuelve "", el tema sale sin figura y ya — que es
+      // muchísimo mejor que una figura que contradice el ejercicio.
+      const svg = tipo === "figura"
+        ? EnsenaiFiguras.figura(datos)
+        : EnsenaiFiguras.grafica(datos);
+      if (svg) {
+        diagrama = { tipo, titulo: String(c.diagrama.titulo || ""), datos };
+      }
     }
   }
 
