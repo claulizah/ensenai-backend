@@ -53,6 +53,10 @@ function mismaPalabra(a, b) {
  */
 function puntuar(palabrasClave, palabrasTexto, fraseTexto) {
   let puntaje = 0;
+  // Además del puntaje se guarda CON QUÉ claves empató. Eso es lo que
+  // después permite darse cuenta de que dos ilustraciones son la misma
+  // lámina en dos versiones (ver agruparPorConcepto abajo).
+  const empataron = [];
   for (const claveBruta of palabrasClave || []) {
     const clave = normalizarFrase(claveBruta);
     if (!clave) continue;
@@ -60,13 +64,33 @@ function puntuar(palabrasClave, palabrasTexto, fraseTexto) {
     if (clave.includes(" ")) {
       // Frase: tiene que aparecer completa, con límites de palabra.
       const patron = new RegExp(`(^|\\s)${clave.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|$)`);
-      if (patron.test(fraseTexto)) puntaje += 3;
+      if (patron.test(fraseTexto)) { puntaje += 3; empataron.push(clave); }
       continue;
     }
 
-    if (palabrasTexto.some((p) => mismaPalabra(p, clave))) puntaje += 1;
+    if (palabrasTexto.some((p) => mismaPalabra(p, clave))) { puntaje += 1; empataron.push(clave); }
   }
-  return puntaje;
+  return { puntaje, empataron };
+}
+
+/**
+ * ¿Estas dos ilustraciones son la misma lámina en dos versiones?
+ *
+ * Se comparan las claves CON LAS QUE EMPATARON, no todas las que tienen.
+ * Si de las claves que las trajeron a esta búsqueda comparten la mitad o
+ * más, para efectos de este tema son lo mismo y no tiene caso enseñar las
+ * dos. Se usa Jaccard (compartidas ÷ total distintas).
+ *
+ * El 0.5 es a propósito flojo: cuando subes una versión mejorada, el agente
+ * que la cataloga no le pone exactamente las mismas palabras que a la
+ * vieja, así que exigir que sean idénticas no cacharía casi ningún par.
+ */
+function sonElMismoConcepto(a, b) {
+  const A = new Set(a), B = new Set(b);
+  if (!A.size || !B.size) return false;
+  let comunes = 0;
+  for (const clave of A) if (B.has(clave)) comunes++;
+  return comunes / (A.size + B.size - comunes) >= 0.5;
 }
 
 /**
@@ -83,7 +107,7 @@ function puntuar(palabrasClave, palabrasTexto, fraseTexto) {
  * @returns {Promise<Array<{id, nombre, image_url, categoria, licencia, autor, fuente_url}>>}
  */
 async function buscarIlustraciones(textoBusqueda, opciones = {}) {
-  const maximo = opciones.maximo || 3;
+  const maximo = opciones.maximo || 2;
   const minimo = opciones.minimo === undefined ? 2 : opciones.minimo;
   if (!supabase) return [];
 
@@ -93,7 +117,7 @@ async function buscarIlustraciones(textoBusqueda, opciones = {}) {
 
   const { data: iconos, error } = await supabase
     .from("icon_library")
-    .select("id, nombre, image_url, categoria, palabras_clave, licencia, autor, fuente_url, activa");
+    .select("id, nombre, image_url, categoria, palabras_clave, licencia, autor, fuente_url, activa, prioridad, created_at");
   // Si la tabla no existe o la consulta falla, el tema simplemente sale sin
   // ilustración: nunca se le cae la generación al usuario por esto.
   if (error || !iconos || iconos.length === 0) return [];
@@ -101,13 +125,42 @@ async function buscarIlustraciones(textoBusqueda, opciones = {}) {
   const puntuadas = [];
   for (const icono of iconos) {
     if (icono.activa === false) continue;
-    const puntaje = puntuar(icono.palabras_clave, palabrasTexto, fraseTexto);
-    if (puntaje >= minimo) puntuadas.push({ icono, puntaje });
+    const { puntaje, empataron } = puntuar(icono.palabras_clave, palabrasTexto, fraseTexto);
+    if (puntaje >= minimo) puntuadas.push({ icono, puntaje, empataron });
   }
 
-  puntuadas.sort((a, b) => b.puntaje - a.puntaje);
+  // ── Orden ESTABLE (5-sep-2026)
+  // Antes solo se ordenaba por puntaje, y el empate lo resolvía el orden en
+  // que Postgres devolvió las filas — que no está garantizado. O sea que el
+  // mismo tema podía salir con una lámina distinta cada vez que se
+  // generaba. Ahora el desempate es explícito y siempre da lo mismo:
+  //   1. puntaje       — qué tan bien le queda al tema
+  //   2. prioridad     — "entre estas dos, gana esta" (schema_v43)
+  //   3. más reciente  — al mejorar una lámina, la nueva gana sola
+  //   4. id            — último recurso, para que nunca quede al azar
+  puntuadas.sort((a, b) => {
+    if (b.puntaje !== a.puntaje) return b.puntaje - a.puntaje;
+    const pa = a.icono.prioridad || 0, pb = b.icono.prioridad || 0;
+    if (pb !== pa) return pb - pa;
+    const fa = Date.parse(a.icono.created_at || 0) || 0;
+    const fb = Date.parse(b.icono.created_at || 0) || 0;
+    if (fb !== fa) return fb - fa;
+    return String(a.icono.id).localeCompare(String(b.icono.id));
+  });
 
-  return puntuadas.slice(0, maximo).map(({ icono }) => ({
+  // ── Una sola por concepto
+  // Tres versiones del sistema solar empatan en todo y antes se mostraban
+  // las tres. Como la lista ya viene ordenada de mejor a peor, basta con
+  // recorrerla y descartar la que sea "la misma lámina" que alguna que ya
+  // entró: la que se queda siempre es la ganadora del desempate de arriba.
+  const elegidas = [];
+  for (const candidata of puntuadas) {
+    if (elegidas.some((e) => sonElMismoConcepto(e.empataron, candidata.empataron))) continue;
+    elegidas.push(candidata);
+    if (elegidas.length >= maximo) break;
+  }
+
+  return elegidas.map(({ icono }) => ({
     id: icono.id,
     nombre: icono.nombre,
     image_url: icono.image_url,
@@ -166,6 +219,7 @@ async function anotarFaltante(tema, nivel) {
 }
 
 module.exports = {
+  sonElMismoConcepto,
   buscarIlustraciones,
   buscarIconoRelevante,
   anotarFaltante,
