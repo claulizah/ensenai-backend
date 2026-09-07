@@ -16,8 +16,9 @@
  */
 
 const Anthropic = require("@anthropic-ai/sdk");
+const { OPCIONES_CLIENTE } = require("../utils/reintento");
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, ...OPCIONES_CLIENTE });
 
 // Las mismas ocho de db/schema_v38.sql — si cambian allá, cambian aquí.
 const CATEGORIAS = [
