@@ -8,6 +8,7 @@ const { verificarYCorregir } = require("../utils/revisorCalidad");
 const { requireBuyer } = require("../middleware/auth");
 const { obtenerPlanIndividual, obtenerPrecios, inicioDeMes } = require("../utils/planes");
 const { avisarTopeJusto } = require("../utils/avisoTope");
+const { avisarFalla } = require("../utils/avisoFalla");
 const { registrarActividad, obtenerEstadoGamificacion, armarTriviaDiaria } = require("../utils/gamificacion");
 const { obtenerOCrearCodigo, obtenerBono, consumirBono } = require("../utils/referidos");
 const { verificarRespuestas } = require("../utils/trivia");
@@ -479,6 +480,10 @@ router.post("/generar", requireBuyer, async (req, res) => {
     const payload = await ejecutarGeneracionTema(req.user, params, req.body.imagenes);
     res.json(payload);
   } catch (err) {
+    avisarFalla({
+      correo: req.user?.email, tema: req.body?.tema, nivel: req.body?.nivel,
+      modo: req.body?.modo, error: err, status: err.status, donde: "generar",
+    });
     res.status(err.status || 500).json({ error: err.message });
   }
 });
@@ -548,7 +553,12 @@ router.post("/generar-async", requireBuyer, async (req, res) => {
         const payload = await ejecutarGeneracionTema(usuario, params, trabajos.imagenesDe(trabajo.id));
         await trabajos.marcarListo(trabajo.id, payload);
       } catch (err) {
-        console.error(`[trabajos] ${trabajo.id} falló:`, err.message);
+        // El log ya no es suficiente: nadie lee los logs de Render, y en
+        // el piloto una falla que no se ve es un maestro que no regresa.
+        avisarFalla({
+          correo: usuario?.email, tema: params.tema, nivel: params.nivel,
+          modo: params.modo, error: err, donde: "generar-async",
+        });
         await trabajos.marcarFallido(trabajo.id, err.message || "No se pudo generar el material.");
       }
     });
@@ -970,6 +980,7 @@ router.post("/pdf", requireBuyer, async (req, res) => {
 
     res.json({ status: "pdf_generado", pdf_url: urlData.publicUrl });
   } catch (err) {
+    avisarFalla({ correo: req.user?.email, tema: req.body?.contenido?.tema, error: err, donde: "pdf" });
     res.status(500).json({ error: err.message });
   } finally {
     if (pdfLocalPath) fs.unlink(pdfLocalPath, () => {});
