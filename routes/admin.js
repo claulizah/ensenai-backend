@@ -61,6 +61,40 @@ function bucketDe(carpetaOPath) {
   return String(carpetaOPath || "").startsWith("plantillas") ? BUCKET_PLANTILLAS : BUCKET;
 }
 
+/**
+ * Edad aproximada de cada nivel escolar (schema_v45). Es el mismo mapa que
+ * usa agents/generateTema.js, aquí para poder deducir la edad de una
+ * plantilla cuando quien la sube solo dice el nivel.
+ */
+const EDAD_DE_NIVEL = {
+  preescolar: [3, 5],
+  primaria_baja: [6, 8],
+  primaria_alta: [9, 12],
+  secundaria: [12, 15],
+  preparatoria: [15, 18],
+  universidad: [18, 99],
+};
+
+/**
+ * Resuelve el rango de edad de una plantilla. Manda lo que venga escrito;
+ * si no viene, se deduce del nivel; si tampoco hay nivel, se deja en null
+ * y significa "sirve para cualquier edad".
+ */
+function rangoDeEdad(edadMin, edadMax, nivel) {
+  const limpia = (v) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) && n >= 2 && n <= 99 ? n : null;
+  };
+  let min = limpia(edadMin);
+  let max = limpia(edadMax);
+  if (min != null && max != null) {
+    return min <= max ? { min, max } : { min: max, max: min };
+  }
+  const porNivel = EDAD_DE_NIVEL[String(nivel || "").trim()];
+  if (porNivel) return { min: porNivel[0], max: porNivel[1] };
+  return { min: null, max: null };
+}
+
 const CATEGORIAS_ILUSTRACION = [
   "emociones",
   "cuerpo_vida",
@@ -543,6 +577,9 @@ router.post("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
     const { nombre, descripcion, categoria, nivel, enfoque, publicada, archivoBase64, tipoMime } = req.body || {};
     // La marca se pone salvo que se pida explícitamente que no.
     const marcar = req.body?.marcar !== false;
+    // Rango de edad (schema_v45): lo que venga escrito manda; si no, se
+    // deduce del nivel.
+    const edad = rangoDeEdad(req.body?.edadMin, req.body?.edadMax, nivel);
 
     const nombreLimpio = String(nombre || "").trim();
     if (!nombreLimpio) return res.status(400).json({ error: "Ponle un nombre a la plantilla." });
@@ -593,6 +630,8 @@ router.post("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
         tipo_mime: tipoMime,
         tamano_bytes: archivo.buffer.length,
         publicada: !!publicada,
+        edad_min: edad.min,
+        edad_max: edad.max,
         hash_archivo: huella,
         marcada,
       })
@@ -607,7 +646,7 @@ router.post("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
       // (42703) y el insert falla entero. Antes que dejarla sin subir, se
       // reintenta sin ellas: la marca y la huella son extras, la plantilla
       // es lo importante.
-      if (/hash_archivo|marcada|42703/.test(error.message || "")) {
+      if (/hash_archivo|marcada|edad_min|edad_max|42703/.test(error.message || "")) {
         const reintento = await supabase
           .from("plantillas")
           .insert({
@@ -654,8 +693,14 @@ router.post("/plantillas", requireBuyer, requireAdmin, async (req, res) => {
 router.patch("/plantillas/:id", requireBuyer, requireAdmin, async (req, res) => {
   if (!requireSupabase(res)) return;
   try {
-    const { nombre, descripcion, categoria, nivel, enfoque, publicada } = req.body || {};
+    const { nombre, descripcion, categoria, nivel, enfoque, publicada, edadMin, edadMax } = req.body || {};
     const cambios = {};
+
+    if (edadMin !== undefined || edadMax !== undefined) {
+      const r = rangoDeEdad(edadMin, edadMax, nivel);
+      cambios.edad_min = r.min;
+      cambios.edad_max = r.max;
+    }
 
     if (nombre !== undefined) {
       const limpio = String(nombre).trim();
