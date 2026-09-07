@@ -56,11 +56,27 @@ router.get("/plantillas", requireBuyer, async (req, res) => {
       return res.json({ plantillas: [], bloqueada: true, total: count || 0 });
     }
 
-    const { data, error } = await supabase
+    // Se piden las columnas de edad (schema_v45), pero si todavía no se
+    // corre esa migración la consulta falla ENTERA y la biblioteca se
+    // vería vacía — 266 plantillas desaparecidas por no haber corrido un
+    // SQL. Por eso hay reintento sin esas dos columnas: se pierde el
+    // filtro por edad, no el catálogo.
+    const COLS = "id, nombre, descripcion, categoria, nivel, enfoque, tipo_mime, tamano_bytes, created_at";
+    let { data, error } = await supabase
       .from("plantillas")
-      .select("id, nombre, descripcion, categoria, nivel, enfoque, tipo_mime, tamano_bytes, created_at")
+      .select(`${COLS}, edad_min, edad_max`)
       .eq("publicada", true)
       .order("created_at", { ascending: false });
+
+    let sinEdad = false;
+    if (error && /edad_min|edad_max|42703/.test(error.message || "")) {
+      sinEdad = true;
+      ({ data, error } = await supabase
+        .from("plantillas")
+        .select(COLS)
+        .eq("publicada", true)
+        .order("created_at", { ascending: false }));
+    }
 
     // Si todavía no se corre db/schema_v38.sql, la tabla no existe: se
     // contesta lista vacía en vez de romperle el panel al maestro.
@@ -68,13 +84,38 @@ router.get("/plantillas", requireBuyer, async (req, res) => {
 
     const nivel = String(req.query.nivel || "").trim();
     const enfoque = String(req.query.enfoque || "").trim();
+    const categoria = String(req.query.categoria || "").trim();
+
+    // Filtro por edad (schema_v45). Se puede pedir una edad suelta
+    // (?edad=5) o un rango (?edad_min=6&edad_max=8).
+    const pedidaMin = Number(req.query.edad_min ?? req.query.edad);
+    const pedidaMax = Number(req.query.edad_max ?? req.query.edad);
+    const hayEdad = Number.isFinite(pedidaMin) && Number.isFinite(pedidaMax);
+
     const lista = (data || []).filter((p) => {
       if (nivel && p.nivel && p.nivel !== nivel) return false;
       if (enfoque && p.enfoque && p.enfoque !== enfoque) return false;
+      if (categoria && (p.categoria || "otros") !== categoria) return false;
+
+      if (hayEdad) {
+        // Una plantilla sin edad significa "sirve para cualquiera": nunca
+        // se esconde. Las que sí la tienen se muestran cuando su rango se
+        // CRUZA con el pedido, no cuando coincide exacto — si busco para
+        // un niño de 5 y la hoja dice "4 a 10", me sirve.
+        if (p.edad_min == null && p.edad_max == null) return true;
+        const min = p.edad_min ?? 0;
+        const max = p.edad_max ?? 99;
+        if (max < pedidaMin || min > pedidaMax) return false;
+      }
       return true;
     });
 
-    res.json({ plantillas: lista });
+    res.json({
+      plantillas: lista,
+      // El front esconde los chips de edad si esto viene en true, en vez
+      // de pintar un filtro que no filtraría nada.
+      ...(sinEdad ? { sinEdad: true } : {}),
+    });
   } catch (err) {
     res.json({ plantillas: [] });
   }
