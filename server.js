@@ -10,6 +10,7 @@ const gruposRouter = require("./routes/grupos");
 const temasRouter = require("./routes/temas");
 const referidosRouter = require("./routes/referidos");
 const feedbackRouter = require("./routes/feedback");
+const supabaseEstado = require("./db/supabase");
 const adminRouter = require("./routes/admin");
 const paquetesRouter = require("./routes/paquetes");
 const recursosRouter = require("./routes/recursos");
@@ -52,7 +53,52 @@ app.post("/api/inbound/webhook", express.raw({ type: "application/json" }), inbo
 // quedaba corto y devolvía un 413 sin mensaje útil.
 app.use(express.json({ limit: "12mb" }));
 
+/**
+ * /health — la revisa RENDER para decidir si la instancia está viva.
+ *
+ * Se queda como está a propósito: contesta rápido y siempre 200. Si aquí
+ * empezáramos a revisar Supabase y a fallar cuando Supabase tiene un mal
+ * día, Render daría la instancia por muerta y la reiniciaría en bucle —
+ * el remedio sería peor que la enfermedad.
+ */
 app.get("/health", (req, res) => res.json({ status: "ok", service: "ensenai-backend" }));
+
+/**
+ * /estado — esta es la que revisa UptimeRobot.
+ *
+ * /health solo prueba que el proceso de Node respira. Con Supabase caído,
+ * /health sigue diciendo "ok" mientras ningún maestro puede entrar ni
+ * generar un tema: el peor tipo de caída, la que no se ve.
+ *
+ * Aquí sí se toca la base con la consulta más barata posible (una fila,
+ * solo el conteo). Contesta SIEMPRE 200 —para no confundir a Render si
+ * algún día alguien apunta su health check aquí— y lo que cambia es el
+ * texto: "ok" o "degradado". UptimeRobot se configura como monitor de
+ * palabra clave buscando  "status":"ok"  y avisa cuando desaparece.
+ */
+app.get("/estado", async (req, res) => {
+  const inicio = Date.now();
+  const salida = { status: "ok", service: "ensenai-backend", supabase: "ok", ms: 0 };
+
+  if (!supabaseEstado) {
+    salida.status = "degradado";
+    salida.supabase = "sin configurar";
+  } else {
+    try {
+      const { error } = await supabaseEstado
+        .from("platform_settings")
+        .select("id", { count: "exact", head: true })
+        .limit(1);
+      if (error) throw new Error(error.message);
+    } catch (err) {
+      salida.status = "degradado";
+      salida.supabase = String(err.message || err).slice(0, 120);
+    }
+  }
+
+  salida.ms = Date.now() - inicio;
+  res.json(salida);
+});
 
 app.use("/api/courses", coursesRouter);
 app.use("/api/creators", creatorsRouter);
