@@ -1,7 +1,8 @@
 const Anthropic = require("@anthropic-ai/sdk");
 const EnsenaiFiguras = require("../utils/figuras");
+const { conReintento, esDeSaturacion, OPCIONES_CLIENTE } = require("../utils/reintento");
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, ...OPCIONES_CLIENTE });
 
 /**
  * Generador de material por TEMA (pivote sin video) — reemplaza a
@@ -604,15 +605,25 @@ async function generarMaterialTema(tema, nivel, perfilDominante, modo = "individ
   const prompt = buildPrompt(tema, nivel, perfilDominante, modo, detalles, bloquesImagen.length > 0, enfoque);
 
   try {
-    return await intentarGenerar(prompt, bloquesImagen);
+    // 3 intentos con espera entre ellos (utils/reintento.js): un 429 o un
+    // 529 de Anthropic se resuelve solo esperando, y antes gastábamos los
+    // dos intentos en el mismo milisegundo contra la misma pared.
+    return await conReintento(() => intentarGenerar(prompt, bloquesImagen), {
+      intentos: 3,
+      etiqueta: "generarMaterialTema",
+    });
   } catch (err) {
-    try {
-      return await intentarGenerar(prompt, bloquesImagen);
-    } catch (err2) {
+    // Dos fallas distintas, dos mensajes distintos: decirle "la respuesta
+    // llegó incompleta" a alguien que solo cayó en un momento saturado lo
+    // manda a revisar su tema, que no tiene nada malo.
+    if (esDeSaturacion(err)) {
       throw new Error(
-        `No se pudo generar el material — la respuesta llegó incompleta. Intenta de nuevo. (${err2.message})`
+        "El servicio de IA está saturado en este momento. Ya lo intentamos 3 veces — espera un minuto y vuelve a darle, tu tema no se gastó."
       );
     }
+    throw new Error(
+      `No se pudo generar el material — la respuesta llegó incompleta. Intenta de nuevo. (${err.message})`
+    );
   }
 }
 
@@ -680,11 +691,8 @@ Deben ser exactamente 8 elementos, uno por cada inteligencia de la lista, sin re
     return ordenadas;
   };
 
-  try {
-    return await pedir();
-  } catch (err) {
-    return await pedir(); // un reintento, igual que generarMaterialTema
-  }
+  // Mismo criterio que generarMaterialTema: 3 intentos con espera.
+  return await conReintento(pedir, { intentos: 3, etiqueta: "actividadesPorInteligencia" });
 }
 
 module.exports = {
