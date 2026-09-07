@@ -41,8 +41,16 @@ Contesta SOLO un objeto JSON, sin texto alrededor y sin bloque de código:
   "descripcion": "...",
   "categoria": "una de: ${CATEGORIAS.join(" | ")}",
   "nivel": "una de: ${NIVELES.join(" | ")} — o null si sirve para cualquier edad",
-  "enfoque": "escolar | psicoeducativo | null"
+  "enfoque": "escolar | psicoeducativo | null",
+  "edad_min": 0,
+  "edad_max": 0
 }
+
+EDAD (schema_v45)
+- \`edad_min\` y \`edad_max\` son la edad REAL en años para la que sirve la hoja, mirando qué tan difícil es de verdad: cuánto texto tiene, si hay que leer o solo colorear, si pide escribir o solo trazar.
+- Puede cruzar varios niveles. Una hoja de recortar figuras sirve de los 4 a los 10; no la encajones en uno solo.
+- Sé honesta con el mínimo: si hay que leer una instrucción, no puede ser 3.
+- Si de verdad sirve para cualquier edad, pon las dos en null.
 
 Reglas del NOMBRE (es lo más importante: con eso la buscan y con eso se engancha al tema que el maestro genera):
 - De 3 a 8 palabras, concreto y en español de México.
@@ -119,11 +127,27 @@ async function describirPlantilla(base64, tipoMime, pistaNombreArchivo = "") {
     return null;
   }
 
+  /** Edad válida y con los pies en la tierra, o null. */
+  const edad = (v) => {
+    const n = Math.round(Number(v));
+    return Number.isFinite(n) && n >= 2 && n <= 99 ? n : null;
+  };
+  let edadMin = edad(datos.edad_min);
+  let edadMax = edad(datos.edad_max);
+  // Si vienen al revés, se acomodan en vez de descartarlas.
+  if (edadMin != null && edadMax != null && edadMin > edadMax) {
+    [edadMin, edadMax] = [edadMax, edadMin];
+  }
+  // Una sola sin la otra no sirve para filtrar por rango: se tiran las dos.
+  if (edadMin == null || edadMax == null) { edadMin = null; edadMax = null; }
+
   const nombre = String(datos.nombre || "").trim().slice(0, 200);
   if (!nombre) return null;
 
   return {
     nombre,
+    edad_min: edadMin,
+    edad_max: edadMax,
     descripcion: String(datos.descripcion || "").trim().slice(0, 800),
     categoria: limpiar(datos.categoria, CATEGORIAS) || "otros",
     nivel: limpiar(datos.nivel, NIVELES),
