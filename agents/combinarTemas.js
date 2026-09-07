@@ -1,7 +1,8 @@
 const Anthropic = require("@anthropic-ai/sdk");
+const { OPCIONES_CLIENTE } = require("../utils/reintento");
 const { normalizarContenido, ETIQUETAS_NIVEL } = require("./generateTema");
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, ...OPCIONES_CLIENTE });
 
 /**
  * Genera un material de REPASO que combina varios temas ya generados (de
