@@ -1,7 +1,8 @@
 const Anthropic = require("@anthropic-ai/sdk");
+const { OPCIONES_CLIENTE } = require("../utils/reintento");
 const { normalizarImagenes } = require("./generateTema");
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, ...OPCIONES_CLIENTE });
 
 /**
  * Revisa la foto de un ejercicio YA RESUELTO A MANO y regresa, paso por
