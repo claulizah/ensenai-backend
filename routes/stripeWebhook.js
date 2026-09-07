@@ -1,5 +1,6 @@
 const Stripe = require("stripe");
 const supabase = require("../db/supabase");
+const { avisarFalla } = require("../utils/avisoFalla");
 
 async function stripeWebhookHandler(req, res) {
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -16,7 +17,15 @@ async function stripeWebhookHandler(req, res) {
   try {
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
-      const tipo = session.metadata.type; // "credit_pack" | "bundle" | "suscripcion"
+
+      // Si metadata viene vacío o incompleto (una Checkout Session armada
+      // a mano o mal configurada), antes esto tronaba con un TypeError que
+      // caía en el catch de abajo y se perdía. Ahora es un error explícito.
+      if (!session.metadata || !session.metadata.type) {
+        throw new Error(`checkout.session.completed sin metadata.type (session ${session.id})`);
+      }
+
+      const tipo = session.metadata.type; // "credit_pack" | "bundle" | "suscripcion" | "tema_grupo"
 
       if (tipo === "bundle") {
         await procesarCompraDePaquete(session);
@@ -33,7 +42,21 @@ async function stripeWebhookHandler(req, res) {
       await procesarCancelacionSuscripcion(event.data.object);
     }
   } catch (err) {
-    console.error("Error procesando evento de Stripe:", err.message);
+    // ESTE ERA EL BUG: se hacía console.error y se contestaba 200 igual,
+    // así que Stripe daba el evento por entregado y NUNCA lo reintentaba.
+    // Resultado: alguien pagaba, algo fallaba al darle su plan (Supabase
+    // con hipo, un bug, lo que sea), y se quedaba pagando sin plan sin que
+    // nadie se enterara. Contestando 500, Stripe reintenta solo con
+    // backoff durante varios días — que es justo lo que queremos cuando
+    // la falla es nuestra y no del evento.
+    avisarFalla({
+      correo: event.data?.object?.customer_details?.email || event.data?.object?.customer_email,
+      tema: event.data?.object?.id,
+      error: err,
+      donde: `stripe:${event.type}`,
+    });
+    console.error(`Error procesando evento de Stripe (${event.type}):`, err.message);
+    return res.status(500).json({ received: false, error: err.message });
   }
 
   res.json({ received: true });
@@ -119,10 +142,32 @@ async function procesarInicioSuscripcion(session) {
 }
 
 /** Renovación (o cambio de estado, ej. pago fallido) de una suscripción existente. */
-async function procesarActualizacionSuscripcion(subscription) {
-  const status = subscription.status === "active" ? "activa" : subscription.status === "past_due" ? "pago_fallido" : "activa";
 
-  const cambios = { status };
+// Mapeo explícito de los status de Stripe a los nuestros. ANTES: cualquier
+// status no reconocido (canceled, unpaid, incomplete_expired, paused…)
+// caía en un default de "activa" — o sea, una suscripción que Stripe ya
+// dio por cancelada o impagada quedaba marcada como ACTIVA en nuestra
+// base, y esa persona seguía usando la plataforma sin pagar.
+const STATUS_STRIPE_A_INTERNO = {
+  active: "activa",
+  trialing: "activa",
+  past_due: "pago_fallido",
+  unpaid: "pago_fallido",
+  incomplete: "pago_fallido",
+  incomplete_expired: "cancelada",
+  canceled: "cancelada",
+  paused: "cancelada",
+};
+
+async function procesarActualizacionSuscripcion(subscription) {
+  const status = STATUS_STRIPE_A_INTERNO[subscription.status];
+  if (!status) {
+    // Un status que no conocemos: mejor dejar el guardado como está que
+    // arriesgarnos a marcarlo mal.
+    console.error(`Status de suscripción de Stripe no reconocido: "${subscription.status}" (sub ${subscription.id})`);
+  }
+
+  const cambios = status ? { status } : {};
   const fin = finDePeriodoISO(subscription);
   if (fin) cambios.current_period_end = fin; // no pisar la fecha buena con null
 
@@ -153,16 +198,38 @@ async function procesarPagoTemaGrupo(session) {
 async function procesarCompraDeCreditos(session) {
   const { user_id, credit_pack_id, credits_total, price_paid_mxn } = session.metadata;
 
-  await supabase.from("credit_batches").insert({
-    user_id,
-    credit_pack_id,
-    credits_total: Number(credits_total),
-    credits_remaining: Number(credits_total),
-    price_paid_mxn: Number(price_paid_mxn),
-    price_per_credit_mxn: Number(price_paid_mxn) / Number(credits_total),
-    stripe_checkout_session_id: session.id,
-    stripe_payment_status: "pagado",
-  });
+  const creditsTotalNum = Number(credits_total);
+  const pricePaidNum = Number(price_paid_mxn);
+
+  // Antes, metadata no numérica o credits_total en 0 se guardaba como
+  // NaN/Infinity sin que nada lo detectara.
+  if (!Number.isFinite(creditsTotalNum) || creditsTotalNum <= 0 || !Number.isFinite(pricePaidNum)) {
+    throw new Error(
+      `Metadata inválida en compra de créditos (session ${session.id}): credits_total="${credits_total}", price_paid_mxn="${price_paid_mxn}"`
+    );
+  }
+
+  // Stripe puede reenviar el mismo evento más de una vez — es el
+  // comportamiento esperado, no un caso raro. Sin protección, un reintento
+  // le daba créditos DOBLES al usuario. Requiere la constraint UNIQUE de
+  // db/schema_v46.sql; sin ella el onConflict no sirve de nada.
+  const { error } = await supabase.from("credit_batches").upsert(
+    {
+      user_id,
+      credit_pack_id,
+      credits_total: creditsTotalNum,
+      credits_remaining: creditsTotalNum,
+      price_paid_mxn: pricePaidNum,
+      price_per_credit_mxn: Math.round((pricePaidNum / creditsTotalNum) * 100) / 100,
+      stripe_checkout_session_id: session.id,
+      stripe_payment_status: "pagado",
+    },
+    { onConflict: "stripe_checkout_session_id", ignoreDuplicates: true }
+  );
+
+  if (error) {
+    throw new Error(`No se pudo guardar la compra de créditos de ${user_id}: ${error.message}`);
+  }
 }
 
 async function procesarCompraDePaquete(session) {
