@@ -11,6 +11,7 @@ const temasRouter = require("./routes/temas");
 const referidosRouter = require("./routes/referidos");
 const feedbackRouter = require("./routes/feedback");
 const adminRouter = require("./routes/admin");
+const paquetesRouter = require("./routes/paquetes");
 const recursosRouter = require("./routes/recursos");
 const { stripeWebhookHandler } = require("./routes/stripeWebhook");
 const { inboundEmailWebhookHandler } = require("./routes/inboundEmail");
@@ -62,6 +63,7 @@ app.use("/api/grupos", gruposRouter);
 app.use("/api/temas", temasRouter);
 app.use("/api/referidos", referidosRouter);
 app.use("/api/feedback", feedbackRouter);
+app.use("/api/admin/paquetes", paquetesRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/recursos", recursosRouter);
 
