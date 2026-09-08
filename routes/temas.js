@@ -1,10 +1,11 @@
 const express = require("express");
 const fs = require("fs");
-const { generarMaterialTema, askClaude, EDAD_APROX } = require("../agents/generateTema");
+const { generarMaterialTema, askClaude, EDAD_APROX, clasificarNotasReparables, repararSecciones } = require("../agents/generateTema");
 const { generarPdfTema } = require("../agents/pdfTema");
 const { combinarTemas } = require("../agents/combinarTemas");
 const { revisarEjercicio } = require("../agents/revisarEjercicio");
-const { verificarYCorregir } = require("../utils/revisorCalidad");
+const { verificarYCorregir, generarRapido, revisarEnSegundoPlano } = require("../utils/revisorCalidad");
+const cacheMaterialTema = require("../utils/cacheMaterialTema");
 const { requireBuyer } = require("../middleware/auth");
 const { obtenerPlanIndividual, obtenerPrecios, inicioDeMes } = require("../utils/planes");
 const { avisarTopeJusto } = require("../utils/avisoTope");
@@ -367,8 +368,21 @@ function validarPeticionTema(cuerpo) {
  *
  * `imagenes` va aparte de `params` porque en el camino asíncrono no viaja
  * por la base de datos (pesa megas en base64, ver utils/trabajos.js).
+ *
+ * `opciones.trabajoId` (8-sep-2026) — presente SOLO cuando esta llamada
+ * viene del trabajo en segundo plano (POST /generar-async), nunca desde
+ * POST /generar. Cambia dos cosas:
+ *   1. Cuál camino de utils/revisorCalidad.js se usa (ver más abajo):
+ *      con trabajoId, no se bloquea por la revisión de IA — se entrega en
+ *      cuanto pasan las validaciones gratis, y la revisión de verdad
+ *      sigue aparte. Sin trabajoId (POST /generar), la respuesta HTTP es
+ *      la única oportunidad de entregar algo, así que sigue esperando la
+ *      revisión completa, como siempre.
+ *   2. Le da a la revisión en segundo plano un lugar dónde avisar si
+ *      corrige algo (utils/trabajos.js/corregirResultado).
  */
-async function ejecutarGeneracionTema(user, params, imagenes) {
+async function ejecutarGeneracionTema(user, params, imagenes, opciones = {}) {
+  const { trabajoId } = opciones;
   const { tema, nivel, enfoque: enfoqueFinal, modo: modoFinal, perfilId, etiquetas, detalles } = params;
 
   let perfilDominante = ["linguistica"]; // default balanceado si no se indica perfil (ignorado en modo grupo)
@@ -400,11 +414,6 @@ async function ejecutarGeneracionTema(user, params, imagenes) {
   // `detalles` (nota escrita) e `imagenes` (fotos de un resumen/apuntes)
   // son opcionales — orientan la generación sin limitarla. Ver
   // agents/generateTema.js, que valida y descarta imágenes mal formadas.
-  // La llamada real va envuelta en verificarYCorregir (utils/revisorCalidad.js):
-  // valida estructura y nivel de lectura gratis, y si eso pasa limpio hace
-  // una revisión barata con IA — si algo falla, regenera con instrucciones
-  // correctivas hasta 2 intentos en total. Si se agotan los intentos, se
-  // entrega igual (no se bloquea al usuario) pero sin el sello de verificado.
   const generarFn = (temaOriginal, instruccionesCorrectivas) =>
     generarMaterialTema(temaOriginal, nivel, perfilDominante, modoFinal, {
       detalles: instruccionesCorrectivas ? `${detalles || ""} ${instruccionesCorrectivas}`.trim() : detalles,
@@ -412,14 +421,52 @@ async function ejecutarGeneracionTema(user, params, imagenes) {
       enfoque: enfoqueFinal,
     });
 
-  const { material: contenido, calidad } = await verificarYCorregir(
-    askClaude,
-    generarFn,
-    tema,
-    { tipo: "material_tema", modo: modoFinal, edadObjetivo: edadNumericaAproximada(nivel) },
-    2,
-    { onProblemaDetectado: (problemas, intento) => console.warn(`[QA temas/generar] intento ${intento}:`, problemas) }
-  );
+  // Parche en vez de regenerar todo (8-sep-2026, ver agents/generateTema.js):
+  // cuando un intento sale con problemas, esto intenta arreglar solo las
+  // secciones señaladas en vez de volver a generar el material completo.
+  const repararFn = (material, secciones, notas) => repararSecciones(material, secciones, tema, nivel, modoFinal, notas);
+  const contexto = { tipo: "material_tema", modo: modoFinal, enfoque: enfoqueFinal, edadObjetivo: edadNumericaAproximada(nivel) };
+  const onProblemaDetectado = (problemas, intento) => console.warn(`[QA temas/generar] intento ${intento}:`, problemas);
+
+  // Caché de material ya verificado (8-sep-2026, ver utils/cacheMaterialTema.js).
+  // Solo modo grupo (la actividad ahí es genérica, no depende de un perfil
+  // de inteligencias) y solo si no hay nota ni fotos propias (esas SÍ
+  // personalizan, y quien las mandó espera que se usen).
+  const cacheElegible = modoFinal === "grupo" && !detalles && !(imagenes && imagenes.length);
+  const claveCache = cacheElegible
+    ? `material_tema:${modoFinal}:${enfoqueFinal}:${edadNumericaAproximada(nivel)}:${tema.trim().toLowerCase()}`
+    : null;
+
+  let contenido = null;
+  let calidad = null;
+
+  if (cacheElegible) {
+    const enCache = await cacheMaterialTema.get(claveCache);
+    if (enCache) ({ material: contenido, calidad } = enCache);
+  }
+
+  if (!contenido) {
+    if (trabajoId) {
+      // Camino asíncrono (8-sep-2026): no se bloquea por la revisión con
+      // IA (~15s, y antes a veces una regeneración completa encima) — se
+      // entrega en cuanto pasan las validaciones GRATIS (estructura +
+      // nivel de lectura), y la revisión de verdad corre aparte, sin
+      // await, más abajo.
+      ({ material: contenido, calidad } = await generarRapido(generarFn, tema, contexto, 2));
+    } else {
+      // Camino síncrono (POST /generar, sin trabajo detrás): la respuesta
+      // HTTP es la única oportunidad de entregar algo, así que sigue
+      // esperando la revisión completa — pero ya con el parche barato en
+      // vez de regenerar todo cuando algo sale mal.
+      ({ material: contenido, calidad } = await verificarYCorregir(
+        askClaude, generarFn, tema, contexto, 2,
+        { repararFn, clasificarNotas: clasificarNotasReparables, onProblemaDetectado }
+      ));
+      if (cacheElegible && calidad.verificado === true) {
+        await cacheMaterialTema.set(claveCache, { material: contenido, calidad });
+      }
+    }
+  }
 
   // Va ANTES de guardar, para que las ilustraciones queden dentro del
   // contenido del tema y el historial las conserve aunque después se borre
@@ -459,6 +506,36 @@ async function ejecutarGeneracionTema(user, params, imagenes) {
     // si falla el guardado no bloqueamos la respuesta — el usuario ya
     // gastó el tema generado y debe poder verlo aunque no quede en su
     // historial
+  }
+
+  // Si se entregó por el camino rápido (calidad.verificado === "pendiente"),
+  // la revisión de verdad sigue corriendo aparte — SIN await a propósito,
+  // el usuario ya tiene su respuesta. Si encuentra algo (o si sale limpia),
+  // corrige lo que ya se guardó: el tema en mis_temas (modo individual), el
+  // resultado del trabajo (para quien vuelva a preguntar por él) y, si
+  // aplica, la caché — para que el siguiente maestro que pida este mismo
+  // tema de grupo ya reciba la versión revisada, no la pendiente.
+  if (calidad.verificado === "pendiente") {
+    revisarEnSegundoPlano({
+      askClaude, generarFn, repararFn, clasificarNotas: clasificarNotasReparables,
+      material: contenido, temaOriginal: tema, contexto, onProblemaDetectado,
+      alTerminar: async ({ corregido, material: materialFinal }) => {
+        try {
+          if (corregido) await adjuntarIlustraciones(materialFinal, tema, nivel, enfoqueFinal);
+          if (temaId && supabase) {
+            await supabase.from("mis_temas").update({ contenido: materialFinal }).eq("id", temaId);
+          }
+          if (trabajoId) {
+            await trabajos.corregirResultado(trabajoId, materialFinal, true);
+          }
+          if (cacheElegible) {
+            await cacheMaterialTema.set(claveCache, { material: materialFinal, calidad: { verificado: true, intentos: 1, notas: [] } });
+          }
+        } catch (err) {
+          console.warn("[revisión en segundo plano] no se pudo aplicar la corrección:", err.message);
+        }
+      },
+    });
   }
 
   return {
@@ -550,7 +627,7 @@ router.post("/generar-async", requireBuyer, async (req, res) => {
       const usuario = req.user;
       try {
         await trabajos.marcarGenerando(trabajo.id);
-        const payload = await ejecutarGeneracionTema(usuario, params, trabajos.imagenesDe(trabajo.id));
+        const payload = await ejecutarGeneracionTema(usuario, params, trabajos.imagenesDe(trabajo.id), { trabajoId: trabajo.id });
         await trabajos.marcarListo(trabajo.id, payload);
       } catch (err) {
         // El log ya no es suficiente: nadie lee los logs de Render, y en
