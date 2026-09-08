@@ -140,6 +140,31 @@ async function marcarFallido(id, mensaje) {
 }
 
 /**
+ * Actualiza el `contenido`/`calidad` DENTRO de `resultado` de un trabajo
+ * que ya se marcó "listo" (8-sep-2026, revisión en segundo plano — ver
+ * utils/revisorCalidad.js/revisarEnSegundoPlano y routes/temas.js).
+ *
+ * El trabajo ya se entregó al frontend con el material "pendiente" de
+ * revisar; si la revisión encuentra algo y lo corrige (o si sale limpia),
+ * este es el rastro que queda en la tabla — sirve sobre todo para
+ * GET /trabajos/ultimo, por si el usuario vuelve a preguntar por este
+ * mismo trabajo antes de que la revisión haya terminado. No reintenta
+ * mostrarle nada activamente: el frontend ya dejó de sondear este trabajo
+ * en cuanto vio "listo".
+ */
+async function corregirResultado(id, materialFinal, verificado) {
+  requiereSupabase();
+  const { data } = await supabase.from("trabajos_generacion").select("resultado").eq("id", id).maybeSingle();
+  if (!data || !data.resultado) return;
+  const resultado = {
+    ...data.resultado,
+    contenido: materialFinal,
+    calidad: { ...(data.resultado.calidad || {}), verificado },
+  };
+  await actualizar(id, { resultado });
+}
+
+/**
  * Marca como fallidos los trabajos que quedaron colgados (el proceso que
  * los atendía se reinició). Sin esto, el frontend se queda preguntando
  * por un trabajo que nadie va a terminar nunca.
@@ -182,6 +207,7 @@ module.exports = {
   marcarGenerando,
   marcarListo,
   marcarFallido,
+  corregirResultado,
   barrerZombis,
   iniciarBarridoZombis,
 };
