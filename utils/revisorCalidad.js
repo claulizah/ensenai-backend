@@ -344,12 +344,26 @@ cada línea empezando con "- ". No agregues explicaciones adicionales.`;
  *   - onProblemaDetectado(problemas, intento) — callback para que registres
  *     (log, base de datos, etc.) qué tipo de errores salen más seguido y
  *     así ajustar tus prompts de generación con el tiempo.
+ *   - repararFn(material, secciones, notas) y clasificarNotas(notas)
+ *     (8-sep-2026) — si se pasan los dos, cuando un intento falla se
+ *     intenta un PARCHE barato (solo las secciones afectadas) en vez de
+ *     regenerar el material completo. clasificarNotas(notas) decide qué
+ *     secciones tocar (o regresa null/vacío si más vale regenerar todo);
+ *     ver agents/generateTema.js (clasificarNotasReparables/
+ *     repararSecciones) para la implementación real. Si el parche falla
+ *     (error de red, JSON roto), se cae de vuelta a generarFn como antes
+ *     — nunca se pierde el intento por completo.
  */
 async function verificarYCorregir(askClaude, generarFn, temaOriginal, contexto, maxIntentos = 2, opciones = {}) {
-  const { cache, onProblemaDetectado } = opciones;
+  const { cache, onProblemaDetectado, repararFn, clasificarNotas } = opciones;
 
+  // La clave lleva modo Y enfoque además de tipo/edad/tema: dos pedidos con
+  // el mismo tema pero uno individual y otro de grupo (o uno escolar y otro
+  // psicoeducativo) NO son el mismo material — antes de este cambio la
+  // clave no los distinguía (aunque tampoco se usaba cache en ningún
+  // llamador todavía, así que no llegó a servir mal ningún tema real).
   const claveCache = cache
-    ? `${contexto.tipo}:${contexto.edadObjetivo}:${temaOriginal.trim().toLowerCase()}`
+    ? `${contexto.tipo}:${contexto.modo || ""}:${contexto.enfoque || "estudio"}:${contexto.edadObjetivo}:${temaOriginal.trim().toLowerCase()}`
     : null;
 
   if (cache) {
@@ -367,11 +381,26 @@ async function verificarYCorregir(askClaude, generarFn, temaOriginal, contexto, 
 
   while (intentos < maxIntentos) {
     intentos++;
-    const instrucciones = notas.length > 0
-      ? `El intento anterior tuvo estos problemas, corrígelos: ${notas.join('; ')}`
-      : '';
 
-    material = await generarFn(temaOriginal, instrucciones);
+    // A partir del segundo intento, si ya hay material y se puede ubicar
+    // el problema en secciones concretas, se intenta parchar en vez de
+    // regenerar todo (ver comentario de arriba). El primer intento
+    // siempre genera completo — no hay nada que parchar todavía.
+    const seccionesAfectadas = material && notas.length > 0 && clasificarNotas ? clasificarNotas(notas) : null;
+    if (material && seccionesAfectadas && seccionesAfectadas.size > 0 && repararFn) {
+      try {
+        material = await repararFn(material, seccionesAfectadas, notas);
+      } catch (err) {
+        // El parche falló (red, JSON roto) — no se pierde el intento,
+        // se regenera completo como hacíamos antes de este cambio.
+        material = await generarFn(temaOriginal, `El intento anterior tuvo estos problemas, corrígelos: ${notas.join('; ')}`);
+      }
+    } else {
+      const instrucciones = notas.length > 0
+        ? `El intento anterior tuvo estos problemas, corrígelos: ${notas.join('; ')}`
+        : '';
+      material = await generarFn(temaOriginal, instrucciones);
+    }
     notas = [];
 
     // Paso 1: estructura (gratis)
@@ -427,10 +456,128 @@ async function verificarYCorregir(askClaude, generarFn, temaOriginal, contexto, 
   };
 }
 
+// ============================================================
+// 5. CAMINO NO BLOQUEANTE (8-sep-2026)
+//
+// El paso 3 de arriba (revisarConIA) es una llamada de hasta 15s, y si
+// encuentra algo, antes obligaba a regenerar — ahora con repararFn obliga
+// nada más a un parche chico, pero sigue siendo tiempo que el usuario pasa
+// esperando por algo que las validaciones GRATIS ya le dijeron que estaba
+// bien estructurado. Para el camino asíncrono (trabajos_generacion, ver
+// routes/temas.js) no hace falta bloquear esa entrega: se le enseña el
+// material en cuanto pasa estructura + nivel de lectura, y la revisión con
+// IA sigue corriendo aparte — si encuentra algo, se corrige EN EL TEMA YA
+// GUARDADO (quien llama decide cómo, con el callback `alCorregir`).
+//
+// Mismo criterio de siempre: nunca bloquear al usuario por QA. Antes el
+// "no bloquear" significaba "entregar sin sello de verificado si se
+// acaban los intentos"; ahora además significa "no esperar la revisión
+// para nada que ya se ve bien".
+// ============================================================
+
+/**
+ * Genera y dejа pasar solo las validaciones GRATIS (estructura + nivel de
+ * lectura) — nunca llama a revisarConIA. Reintenta generación completa
+ * hasta maxIntentos si la estructura sale mal (eso sí es gratis de
+ * detectar y vale la pena resolverlo antes de mostrar nada, un JSON
+ * incompleto rompería la pantalla).
+ */
+async function generarRapido(generarFn, temaOriginal, contexto, maxIntentos = 2) {
+  let material = null;
+  let notas = [];
+  let intentos = 0;
+
+  while (intentos < maxIntentos) {
+    intentos++;
+    const instrucciones = notas.length > 0
+      ? `El intento anterior tuvo estos problemas, corrígelos: ${notas.join('; ')}`
+      : '';
+    material = await generarFn(temaOriginal, instrucciones);
+    notas = [];
+
+    const estructura = validarEstructura(material, contexto.tipo, contexto.modo, contexto.enfoque);
+    if (!estructura.ok) { notas.push(...estructura.problemas); continue; }
+
+    const textoParaLeer = material.resumen && typeof material.resumen === 'object'
+      ? [material.resumen.que_es, ...(material.resumen.secciones || []).map(s => s.texto)].filter(Boolean).join(' ')
+      : '';
+    if (textoParaLeer) {
+      const { score } = calcularNivelLectura(textoParaLeer);
+      const comparacion = compararConEdad(score, contexto.edadObjetivo);
+      if (!comparacion.ok) { notas.push(comparacion.mensaje); continue; }
+    }
+
+    return { material, calidad: { verificado: "pendiente", intentos, notas: [] } };
+  }
+
+  // Ni la estructura quedó bien tras los reintentos — caso raro, pero aquí
+  // sí conviene entregar lo que haya (no bloquear) marcado sin verificar,
+  // igual que el camino de siempre.
+  return { material, calidad: { verificado: false, intentos, notas } };
+}
+
+/**
+ * Corre la revisión con IA (y el parche/regeneración si hace falta) SIN
+ * que quien la llama tenga que esperarla — se dispara y, cuando termine,
+ * avisa por callback. Pensada para llamarse sin `await` desde quien ya le
+ * entregó el material al usuario vía generarRapido().
+ *
+ * @param {object} args
+ * @param {Function} args.askClaude
+ * @param {Function} args.generarFn - para el fallback de regenerar completo
+ * @param {Function} [args.repararFn] - parche por secciones (ver arriba)
+ * @param {Function} [args.clasificarNotas]
+ * @param {object} args.material - el que ya se le entregó al usuario
+ * @param {string} args.temaOriginal
+ * @param {object} args.contexto
+ * @param {Function} args.alTerminar(resultado) - se llama SIEMPRE que la
+ *   revisión alcanza a completarse (con o sin cambios), con
+ *   { corregido: boolean, material } — `material` es el original si no
+ *   hizo falta tocar nada, o el ya corregido si sí. Es lo que permite a
+ *   quien llama marcar el tema como "verificado" en la base de datos en
+ *   ambos casos, no solo cuando hubo que corregir algo. No se llama si la
+ *   revisión misma falla (red, timeout) — ver el catch de abajo.
+ * @param {Function} [args.onProblemaDetectado]
+ */
+async function revisarEnSegundoPlano({ askClaude, generarFn, repararFn, clasificarNotas, material, temaOriginal, contexto, alTerminar, onProblemaDetectado }) {
+  try {
+    const contextoConTema = { ...contexto, tema: temaOriginal };
+    const revisionIA = await revisarConIA(askClaude, material, contextoConTema);
+    if (revisionIA.ok) {
+      if (alTerminar) await alTerminar({ corregido: false, material });
+      return;
+    }
+
+    if (onProblemaDetectado) onProblemaDetectado(revisionIA.problemas, 1);
+
+    const secciones = clasificarNotas ? clasificarNotas(revisionIA.problemas) : null;
+    let corregido;
+    if (secciones && secciones.size > 0 && repararFn) {
+      try {
+        corregido = await repararFn(material, secciones, revisionIA.problemas);
+      } catch (err) {
+        corregido = await generarFn(temaOriginal, `El material ya se entregó pero el revisor encontró estos problemas, corrígelos: ${revisionIA.problemas.join('; ')}`);
+      }
+    } else {
+      corregido = await generarFn(temaOriginal, `El material ya se entregó pero el revisor encontró estos problemas, corrígelos: ${revisionIA.problemas.join('; ')}`);
+    }
+
+    if (alTerminar) await alTerminar({ corregido: true, material: corregido });
+  } catch (err) {
+    // Nunca debe tumbar nada — el usuario ya tiene su material. Se
+    // registra y ya; en el peor caso el tema se queda sin el sello de
+    // verificado, que es exactamente lo que ya pasaba antes de este
+    // cambio cuando se agotaban los intentos.
+    console.warn("[revisión en segundo plano] no se pudo completar:", err.message);
+  }
+}
+
 module.exports = {
   validarEstructura,
   calcularNivelLectura,
   compararConEdad,
   revisarConIA,
   verificarYCorregir,
+  generarRapido,
+  revisarEnSegundoPlano,
 };
